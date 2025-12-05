@@ -1,0 +1,11 @@
+# Core dependencies
+PyQt5>=5.15
+qdarkstyle>=2.8.1
+pyperclip>=1.8.0
+scapy>=2.5.0
+manuf>=1.1.1
+six>=1.16.0
+requests>=2.25.0
+
+# Build dependencies (optional, for building exe)
+# pyinstaller>=5.0

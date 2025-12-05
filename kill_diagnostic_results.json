@@ -1,0 +1,48 @@
+{
+  "timestamp": "2025-11-29T01:18:43.630876",
+  "platform": "darwin",
+  "python": "3.13.2 (main, Feb  4 2025, 14:51:09) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "tests": {
+    "admin": false,
+    "imports": "pass",
+    "interface": {
+      "name": "en0",
+      "guid": "en0",
+      "ip": "192.168.178.25",
+      "mac": "f4:d4:88:73:55:3f"
+    },
+    "gateway_ip": "192.168.178.1",
+    "gateway_mac": "D4:24:DD:53:6F:5C",
+    "scanner": {
+      "my_ip": "192.168.178.25",
+      "router_ip": "192.168.178.1",
+      "router_mac": "D4:24:DD:53:6F:5C",
+      "iface_name": "en0",
+      "iface_guid": "en0"
+    },
+    "killer": {
+      "iface_name": "en0",
+      "iface_guid": "en0",
+      "iface_mac": "f4:d4:88:73:55:3f",
+      "router": {
+        "ip": "192.168.1.1",
+        "mac": "FF:FF:FF:FF:FF:FF",
+        "vendor": "NONE",
+        "type": "Router",
+        "name": "-",
+        "admin": true
+      }
+    },
+    "conf_iface": "en0",
+    "arp_construction": "pass",
+    "sendp": "skipped",
+    "sniffer": "skipped",
+    "firewall": "skipped",
+    "forwarder_config": "pass",
+    "one_way_kill_logic": "pass",
+    "arp_scan": "skipped"
+  },
+  "critical_issues": [
+    "Not running as admin/root"
+  ]
+}

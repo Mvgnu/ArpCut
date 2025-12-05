@@ -1,0 +1,28 @@
+{
+  "timestamp": "2025-11-28T06:43:15.207976",
+  "platform": "darwin",
+  "python": "3.13.2 (main, Feb  4 2025, 14:51:09) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "tests": {
+    "imports_utils": "pass",
+    "imports_networking": "pass",
+    "imports_firewall": "pass",
+    "imports_scapy": "pass",
+    "iface_count": 25,
+    "default_iface": {
+      "name": "en0",
+      "guid": "en0",
+      "ip": "192.168.178.25",
+      "mac": "f4:d4:88:73:55:3f"
+    },
+    "my_ip": "192.168.178.25",
+    "gateway_ip": "192.168.178.1",
+    "gateway_mac": "D4:24:DD:53:6F:5C",
+    "route_count": 20,
+    "scapy_iface_count": 25,
+    "terminal_ipconfig": 195,
+    "terminal_arp": 838,
+    "terminal_netsh": 34,
+    "firewall": "not accessible",
+    "arp_cache": 11
+  }
+}
