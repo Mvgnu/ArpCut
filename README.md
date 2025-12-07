@@ -49,17 +49,6 @@ If the pre-built binaries don't work on your machine, build from source (see bel
 
 ---
 
-## Screenshots
-
-<!-- Add your screenshots here -->
-![Main Window](assets/screenshots/main.png)
-
-![Lag Switch](assets/screenshots/lagswitch.png)
-
-![Port Blocker](assets/screenshots/portblocker.png)
-
----
-
 ## Installation from Source
 
 ### Windows
@@ -138,7 +127,9 @@ Output:
 Network tools often trigger antivirus false positives. The code is open source and auditable.
 
 <!-- Add VirusTotal link after uploading release binary -->
-[View VirusTotal Scan](https://www.virustotal.com/)
+[Windows](https://www.virustotal.com/gui/file/0d7db182f64251f0c22952192894b66b96cd2a87f9a143767bd07bbdcad4eb14)
+[Macos](https://www.virustotal.com/gui/file/948666b8fad8db4d3870123c794bad28453de5c3265d2cf0be94a1d79e086d46)
+[Linux](https://www.virustotal.com/gui/file/15e91b6b6099b6271f74577c1f44070d2983121199d280d28250bec130be84c5)
 
 ---
 
