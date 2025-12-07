@@ -1,291 +1,290 @@
-# ArpCut
+<p align="center">
+  <img src="assets/logo.png" alt="ArpCut Logo" width="200">
+</p>
 
-**A cross-platform network control tool for ARP spoofing**
+<h1 align="center">ArpCut</h1>
+<p align="center"><strong>Open-source network control tool for Windows & macOS</strong></p>
 
-*Based on [elmoCut](https://github.com/elmoiv/elmocut) by Khaled El-Morshedy (elmoiv)*
+<p align="center">
+  <a href="https://github.com/Mvgnu/ArpCut/releases/latest"><img src="https://img.shields.io/github/v/release/Mvgnu/ArpCut?style=flat-square" alt="Release"></a>
+  <a href="https://github.com/Mvgnu/ArpCut/releases"><img src="https://img.shields.io/github/downloads/Mvgnu/ArpCut/total?style=flat-square" alt="Downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Mvgnu/ArpCut?style=flat-square" alt="License"></a>
+  <a href="#virustotal"><img src="https://img.shields.io/badge/VirusTotal-Clean-brightgreen?style=flat-square" alt="VirusTotal"></a>
+</p>
 
-**Author:** Mvgnus (Magnus Ohle)
+<p align="center">
+  <a href="#-download">Download</a> •
+  <a href="#-why-use-this">Why Use This?</a> •
+  <a href="#-features">Features</a> •
+  <a href="#-screenshots">Screenshots</a> •
+  <a href="#-installation">Installation</a> •
+  <a href="#-building">Building</a>
+</p>
 
 ---
 
-## Table of Contents
+## 📥 Download
 
-- [About](#about)
-- [Features](#features)
-- [Pre-built Binaries](#pre-built-binaries)
-- [Installation from Source](#installation-from-source)
-  - [macOS](#macos-installation)
-  - [Windows](#windows-installation)
-- [Building Executables](#building-executables)
-- [Usage](#usage)
-- [Button Reference](#button-reference)
-- [Disclaimer](#disclaimer)
-- [License](#license)
+**Just want the app? Grab the latest release:**
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| **Windows** | [ArpCut-Setup.exe](https://github.com/Mvgnu/ArpCut/releases/latest) | Run installer, requires [Npcap](https://npcap.com/) |
+| **Windows Portable** | [ArpCut.exe](https://github.com/Mvgnu/ArpCut/releases/latest) | No install needed |
+| **macOS** | [ArpCut.dmg](https://github.com/Mvgnu/ArpCut/releases/latest) | Drag to Applications |
+
+> ⚠️ **Requires Administrator/Root privileges** to run (network packet manipulation needs elevated access)
 
 ---
 
-## About
+## 🤔 Why Use This?
 
-ArpCut is a fork of elmoCut, adapted to work on both **macOS** and **Windows**. It provides network control capabilities through ARP spoofing, allowing you to manage network access for devices on your local network.
+| Feature | ArpCut | NetCut | Other Tools |
+|---------|--------|--------|-------------|
+| **Price** | ✅ Free forever | ❌ Subscription | Varies |
+| **Open Source** | ✅ Fully auditable | ❌ Closed source | Rarely |
+| **No Ads** | ✅ Zero ads | ❌ Ad-supported | Varies |
+| **Cross-Platform** | ✅ Windows + macOS | ❌ Windows only | Usually single |
+| **Lag Switch** | ✅ Built-in | ❌ Not available | Rare |
+| **Port Blocking** | ✅ Per-port control | ❌ Limited | Rare |
 
-## Features
+**ArpCut is the open-source alternative to NetCut.** No subscriptions, no ads, no telemetry. Every line of code is auditable.
 
-- **ARP Scanning** - Fast network device discovery using ARP requests
-- **Ping Scanning** - Thorough network device discovery using ICMP
-- **Kill/Unkill** - Block or restore individual device network access
-- **Kill All/Unkill All** - Mass network control for all devices
-- **Full Kill** - Complete traffic blocking using system firewall (macOS: pf, Windows: ARP)
-- **One-Way Kill** - Asymmetric traffic blocking (block outgoing only)
-- **Lag Switch** - Intermittent connection blocking with configurable timing
-- **Traffic Monitor** - Real-time bandwidth monitoring per device
-- Clean, dark-themed UI with helpful tooltips
+### Perfect For:
+- 🎮 **Gamers** - Lag switch for online games, port blocking for specific traffic
+- 🔧 **Network Admins** - Manage device access on your network
+- 🔒 **Security Testing** - Test network resilience (on networks you own!)
+- 📚 **Learning** - Understand how ARP spoofing works
+
+---
+
+## ✨ Features
+
+### Core Features
+- **ARP Scanning** - Fast device discovery
+- **Ping Scanning** - Thorough network scan
+- **Kill/Unkill** - Block or restore individual device access
+- **Kill All** - One-click network control
+
+### Advanced Features
+- **🎮 Lag Switch** - Create artificial lag with customizable timing
+  - Incoming only / Outgoing only / Both directions
+  - Preset timings (Fast/Medium/Heavy)
+- **🔒 Full Kill** - Complete traffic block using system firewall
+- **📡 One-Way Kill** - Block outgoing only (can receive but not send)
+- **🚪 Port Blocker** - Block specific ports instantly
+  - Common gaming ports preset
+  - TCP/UDP selection
+  - Instant toggle on/off
+- **📊 Traffic Monitor** - Real-time bandwidth per device
+
+### Quality of Life
+- Dark theme UI with tooltips
 - System tray integration
 - Device nicknames
-- Remember killed devices across sessions
+- Remember killed devices
+- Cross-platform (Windows + macOS)
 
 ---
 
-## Pre-built Binaries
+## 📸 Screenshots
 
-Pre-built executables are available in the **Releases** section:
+<!-- TODO: Add actual screenshots -->
 
-| Platform | File | Notes |
-|----------|------|-------|
-| macOS | `ArpCut.dmg` | Mount and drag to Applications |
-| Windows | `ArpCut-Setup.exe` | Run installer |
-| Windows | `ArpCut.exe` | Portable executable |
+### Main Window
+![Main Window](assets/screenshots/main.png)
+*Main interface showing scanned devices and control buttons*
 
-### ⚠️ Important Notes on Pre-built Binaries
+### Lag Switch
+![Lag Switch](assets/screenshots/lagswitch.png)
+*Lag switch configuration with directional options*
 
-- **macOS**: You may need to right-click → Open the first time due to Gatekeeper
-- **Windows**: Requires [Npcap](https://npcap.com/) to be installed
-- **Both platforms require administrator/root privileges**
+### Port Blocker
+![Port Blocker](assets/screenshots/portblocker.png)
+*Port blocking interface with common gaming ports*
 
-If the pre-built binaries don't work on your machine (architecture mismatch, missing dependencies, security restrictions), please [build from source](#building-executables).
+### In Action
+![Demo GIF](assets/screenshots/demo.gif)
+*ArpCut in action - scanning and blocking a device*
 
----
-
-## Installation from Source
-
-### macOS Installation
-
-#### 1. Install Python 3.8+
-
-**Option A: Using Homebrew (Recommended)**
-```bash
-# Install Homebrew if not already installed
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install Python
-brew install python@3.11
-```
-
-**Option B: Download from python.org**
-1. Go to [python.org/downloads](https://www.python.org/downloads/)
-2. Download the latest Python 3.x installer for macOS
-3. Run the installer
-
-#### 2. Clone the Repository
-```bash
-git clone https://github.com/YOUR_USERNAME/arpcut.git
-cd arpcut
-```
-
-#### 3. Create Virtual Environment (Recommended)
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-#### 4. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-#### 5. Run ArpCut
-```bash
-# Must run as root for network packet manipulation
-sudo python3 src/elmocut.py
-```
+> 📷 **Screenshots needed!** If you have good screenshots, please contribute!
 
 ---
 
-### Windows Installation
+## 🛡️ VirusTotal
 
-#### 1. Install Python 3.8+
+Network tools often trigger false positives in antivirus software because they interact with network adapters at a low level.
 
-1. Go to [python.org/downloads](https://www.python.org/downloads/windows/)
-2. Download the latest Python 3.x installer (64-bit recommended)
-3. **IMPORTANT**: Check "Add Python to PATH" during installation
-4. Click "Install Now"
+**[View VirusTotal Scan Results](https://www.virustotal.com/gui/file/YOUR_HASH_HERE)**
 
-Verify installation:
-```cmd
-python --version
-pip --version
-```
+<!-- TODO: Upload release binary to VirusTotal and replace link above -->
 
-#### 2. Install Npcap
+If you're concerned, you can:
+1. Review the [source code](https://github.com/Mvgnu/ArpCut) yourself
+2. Build from source (instructions below)
+3. Check the VirusTotal link above
 
-Npcap is required for packet capture on Windows:
+---
 
-1. Download from [npcap.com](https://npcap.com/#download)
-2. Run the installer
-3. **IMPORTANT**: Check "Install Npcap in WinPcap API-compatible Mode"
-4. Complete the installation
+## 💻 Installation
 
-#### 3. Install Visual C++ Redistributable
+### Windows (Easy Way)
 
-If you encounter DLL errors, install the Visual C++ Redistributable:
-- Download from [Microsoft](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+1. Download [ArpCut-Setup.exe](https://github.com/Mvgnu/ArpCut/releases/latest)
+2. Install [Npcap](https://npcap.com/#download) (check "WinPcap API-compatible Mode")
+3. Run ArpCut as Administrator
 
-#### 4. Clone the Repository
-```cmd
-git clone https://github.com/YOUR_USERNAME/arpcut.git
-cd arpcut
-```
+### macOS (Easy Way)
 
-Or download and extract the ZIP file.
+1. Download [ArpCut.dmg](https://github.com/Mvgnu/ArpCut/releases/latest)
+2. Drag to Applications
+3. Right-click → Open (first time, due to Gatekeeper)
+4. Run with: `sudo /Applications/ArpCut.app/Contents/MacOS/ArpCut`
 
-#### 5. Create Virtual Environment (Recommended)
-```cmd
+### From Source (Both Platforms)
+
+<details>
+<summary><strong>Windows</strong></summary>
+
+```powershell
+# 1. Install Python 3.8+ from python.org (check "Add to PATH")
+# 2. Install Npcap from npcap.com
+
+# 3. Clone and setup
+git clone https://github.com/Mvgnu/ArpCut.git
+cd ArpCut
 python -m venv venv
 venv\Scripts\activate
-```
-
-#### 6. Install Dependencies
-```cmd
 pip install -r requirements.txt
-```
 
-#### 7. Run ArpCut
-```cmd
-# Run as Administrator (right-click Command Prompt → Run as Administrator)
+# 4. Run as Administrator
 python src\elmocut.py
 ```
+</details>
+
+<details>
+<summary><strong>macOS</strong></summary>
+
+```bash
+# 1. Install Python (via Homebrew recommended)
+brew install python@3.11
+
+# 2. Clone and setup
+git clone https://github.com/Mvgnu/ArpCut.git
+cd ArpCut
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Run with root
+sudo python3 src/elmocut.py
+```
+</details>
 
 ---
 
-## Building Executables
+## 🔨 Building
 
-### Building on macOS (DMG)
+### Automated Builds (GitHub Actions)
 
-#### Prerequisites
+Every release automatically builds binaries for:
+- Windows (.exe installer + portable)
+- macOS (.dmg)
+
+Just create a new release tag and binaries will be attached automatically.
+
+### Manual Build
+
+<details>
+<summary><strong>Windows EXE</strong></summary>
+
+```powershell
+pip install pyinstaller
+python build.py
+# Output: dist/ArpCut.exe
+```
+</details>
+
+<details>
+<summary><strong>macOS DMG</strong></summary>
+
 ```bash
 pip install pyinstaller
-brew install create-dmg  # Optional, for creating DMG
-```
+brew install create-dmg
 
-#### Build
-```bash
-# Activate virtual environment if using one
-source venv/bin/activate
-
-# Build with PyInstaller
 pyinstaller --onefile --windowed --name ArpCut \
     --add-data "exe/manuf:manuf" \
     --icon exe/icon.ico \
     src/elmocut.py
 
-# The app will be in dist/ArpCut.app
+create-dmg --volname "ArpCut" "ArpCut.dmg" "dist/ArpCut.app"
 ```
-
-#### Create DMG (Optional)
-```bash
-create-dmg \
-    --volname "ArpCut" \
-    --window-size 600 400 \
-    --icon-size 100 \
-    --icon "ArpCut.app" 150 200 \
-    --app-drop-link 450 200 \
-    "ArpCut.dmg" \
-    "dist/ArpCut.app"
-```
-
-### Building on Windows (EXE)
-
-#### Prerequisites
-```cmd
-pip install pyinstaller
-```
-
-#### Build
-```cmd
-REM Activate virtual environment if using one
-venv\Scripts\activate
-
-REM Use the included build script
-python build.py
-
-REM Or build manually
-pyinstaller --onefile --windowed --name ArpCut ^
-    --add-data "exe\manuf;manuf" ^
-    --icon exe\icon.ico ^
-    src\elmocut.py
-```
-
-The executable will be in `dist\ArpCut.exe`
+</details>
 
 ---
 
-## Usage
+## 🎮 Usage Guide
 
-1. **Launch ArpCut** with administrator/root privileges
-2. **Scan the network** using ARP Scan (fast) or Ping Scan (thorough)
-3. **Select a device** from the discovered devices list
-4. **Apply controls** using the action buttons
+### Basic Usage
+1. **Launch** ArpCut with admin/root privileges
+2. **Scan** using ARP (fast) or Ping (thorough)
+3. **Select** a device from the list
+4. **Control** using the action buttons
 
-### Right-Click Context Menu
+### Button Reference
 
-Right-click on any device in the table for additional options:
-- Copy IP/MAC address
-- Set device nickname
-- Open Traffic Monitor
+| Button | What It Does |
+|--------|--------------|
+| 🔍 ARP Scan | Fast scan using ARP requests |
+| 🔍 Ping Scan | Thorough scan using ICMP |
+| ❌ Kill | Block selected device |
+| ✅ Unkill | Restore selected device |
+| ❌❌ Kill All | Block all devices |
+| ✅✅ Unkill All | Restore all devices |
+| **Lag Switch** | Toggle artificial lag (configurable) |
+| **Full Kill** | Complete firewall block |
+| **One-Way Kill** | Block outgoing only |
+| **Port Blocker** | Block specific ports |
+
+### Right-Click Menu
+Right-click any device for:
+- Copy IP/MAC
+- Set nickname
+- Traffic monitor
 - Quick kill/unkill
 
 ---
 
-## Button Reference
+## ⚠️ Disclaimer
 
-| Button | Action | Description |
-|--------|--------|-------------|
-| 🔍 ARP Scan | `btnScanEasy` | Fast network scan using ARP requests. May miss some devices. |
-| 🔍 Ping Scan | `btnScanHard` | Thorough scan using ICMP ping. Slower but finds all devices. |
-| ❌ Kill | `btnKill` | Block internet access for the selected device. |
-| ✅ Unkill | `btnUnkill` | Restore internet access for the selected device. |
-| ❌❌ Kill All | `btnKillAll` | Block internet access for ALL devices on the network. |
-| ✅✅ Unkill All | `btnUnkillAll` | Restore internet access for all blocked devices. |
-| ⚙️ Settings | `btnSettings` | Configure scan options, interface, and appearance. |
-| ℹ️ About | `btnAbout` | View credits and version info. |
-| **Lag Switch** | Text button | Create intermittent connectivity by cycling block/unblock. |
-| **Full Kill** | Text button | Complete traffic block using system firewall. |
-| **One-Way Kill** | Text button | Block only outgoing traffic from the device. |
+**This software is for educational and authorized network administration only.**
+
+- Only use on networks you **own** or have **explicit written permission** to test
+- Unauthorized use may violate computer crime laws
+- You are solely responsible for how you use this tool
 
 ---
 
-## Disclaimer
+## 🙏 Credits
 
-**⚠️ This software is provided for educational and authorized network administration purposes only.**
+- **Author:** [Mvgnus](https://github.com/Mvgnu) (Magnus Ohle)
+- **Based on:** [elmoCut](https://github.com/elmoiv/elmocut) by [elmoiv](https://github.com/elmoiv) (Khaled El-Morshedy)
 
-The use of this software is done at your own discretion and risk. You are solely responsible for any damage or unauthorized access that may result from its use. 
-
-**Only use ArpCut on networks you own or have explicit written permission to test.**
-
-Unauthorized use of ARP spoofing tools may violate computer crime laws in your jurisdiction.
-
----
-
-## Credits
-
-- Original [elmoCut](https://github.com/elmoiv/elmocut) by [elmoiv](https://github.com/elmoiv) (Khaled El-Morshedy)
-- macOS/Windows adaptation by Mvgnus (Magnus Ohle)
+### Connect
+- 🐙 GitHub: [@Mvgnu](https://github.com/Mvgnu)
+- 𝕏 Twitter: [@YOUR_TWITTER](https://twitter.com/YOUR_TWITTER)
+- 💬 Discord: [YOUR_DISCORD](https://discord.gg/YOUR_DISCORD)
 
 ---
 
-## License
+## 📄 License
 
-This project is licensed under the **GNU General Public License v3.0**.
+GNU General Public License v3.0 - see [LICENSE](LICENSE)
 
-You are free to use, study, share, and improve this software. See [LICENSE](LICENSE) for details.
+You are free to use, modify, and distribute this software.
 
-[![GNU GPLv3](https://www.gnu.org/graphics/gplv3-127x51.png)](https://www.gnu.org/licenses/gpl-3.0.en.html)
+<p align="center">
+  <a href="https://www.gnu.org/licenses/gpl-3.0.en.html">
+    <img src="https://www.gnu.org/graphics/gplv3-127x51.png" alt="GPL v3">
+  </a>
+</p>

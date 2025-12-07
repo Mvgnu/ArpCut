@@ -87,7 +87,8 @@ class Settings(QMainWindow, Ui_MainWindow):
         self.elmocut.iface = get_iface_by_name(iface)
         self.updateElmocutSettings()
         # Fix horizontal headerfont reverts to normal after applying settings
-        self.elmocut.tableScan.horizontalHeader().setFont(QFont('Consolas', 11))
+        mono_font = 'Menlo' if __import__('sys').platform == 'darwin' else 'Consolas'
+        self.elmocut.tableScan.horizontalHeader().setFont(QFont(mono_font, 11))
 
         if not silent_apply:
             MsgType.INFO(

@@ -193,3 +193,116 @@ def pf_test_roundtrip(iface: str, victim_ip: str) -> bool:
     return ok1 and present and ok2
 
 
+# ============== PORT BLOCKING ==============
+
+def block_port(iface: str, port: int, proto: str = 'tcp', direction: str = 'both') -> bool:
+    """
+    Block a specific port on the network interface.
+    direction: 'in', 'out', or 'both'
+    """
+    if sys.platform == 'darwin':
+        rules = []
+        if direction in ('in', 'both'):
+            rules.append(f'block drop quick in on {iface} proto {proto} from any to any port = {port}')
+        if direction in ('out', 'both'):
+            rules.append(f'block drop quick out on {iface} proto {proto} from any to any port = {port}')
+        for rule in rules:
+            _exec(f"sh -c 'echo " + '"' + f"{rule}" + '"' + f" >> {_anchor_file()}'")
+        _exec(f"pfctl -a {ANCHOR} -f {_anchor_file()}")
+        return True
+    elif sys.platform.startswith('win'):
+        rule_name = f'arpcut_port_{port}_{proto}'
+        if direction in ('in', 'both'):
+            cmd = f'netsh advfirewall firewall add rule name="{rule_name}_in" dir=in action=block protocol={proto} localport={port} enable=yes'
+            _exec(cmd)
+        if direction in ('out', 'both'):
+            cmd = f'netsh advfirewall firewall add rule name="{rule_name}_out" dir=out action=block protocol={proto} localport={port} enable=yes'
+            _exec(cmd)
+        return True
+    return False
+
+
+def unblock_port(port: int, proto: str = 'tcp') -> bool:
+    """Remove port blocking rules for the specified port."""
+    if sys.platform == 'darwin':
+        try:
+            path = _anchor_file()
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            with open(path, 'w') as f:
+                for line in lines:
+                    if f'port = {port}' not in line:
+                        f.write(line)
+            _exec(f"pfctl -a {ANCHOR} -f {path}")
+            return True
+        except Exception:
+            return False
+    elif sys.platform.startswith('win'):
+        rule_name = f'arpcut_port_{port}_{proto}'
+        _exec(f'netsh advfirewall firewall delete rule name="{rule_name}_in"')
+        _exec(f'netsh advfirewall firewall delete rule name="{rule_name}_out"')
+        return True
+    return False
+
+
+def is_port_blocked(port: int) -> bool:
+    """Check if a port is currently blocked."""
+    if sys.platform == 'darwin':
+        rules = list_rules()
+        return any(f'port = {port}' in r for r in rules)
+    elif sys.platform.startswith('win'):
+        res = _exec(f'netsh advfirewall firewall show rule name="arpcut_port_{port}_tcp_in"')
+        return 'arpcut_port' in res.stdout.lower()
+    return False
+
+
+def list_blocked_ports() -> list:
+    """Return list of currently blocked ports as [(port, proto, direction), ...]"""
+    blocked = []
+    if sys.platform == 'darwin':
+        rules = list_rules()
+        for rule in rules:
+            if 'port =' in rule:
+                # Parse rule like: block drop quick in on en0 proto tcp from any to any port = 443
+                parts = rule.split()
+                try:
+                    port_idx = parts.index('port')
+                    port = int(parts[port_idx + 2])
+                    proto = 'tcp'
+                    if 'proto' in parts:
+                        proto_idx = parts.index('proto')
+                        proto = parts[proto_idx + 1]
+                    direction = 'in' if ' in on ' in rule else 'out'
+                    blocked.append((port, proto, direction))
+                except (ValueError, IndexError):
+                    pass
+    return blocked
+
+
+def clear_all_port_blocks() -> bool:
+    """Remove all port blocking rules."""
+    if sys.platform == 'darwin':
+        try:
+            path = _anchor_file()
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            with open(path, 'w') as f:
+                for line in lines:
+                    if 'port =' not in line:
+                        f.write(line)
+            _exec(f"pfctl -a {ANCHOR} -f {path}")
+            return True
+        except Exception:
+            return False
+    elif sys.platform.startswith('win'):
+        # Delete all arpcut_port rules
+        res = _exec('netsh advfirewall firewall show rule name=all')
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if 'arpcut_port' in line.lower() and 'Rule Name:' in line:
+                    rule_name = line.split('Rule Name:')[1].strip()
+                    _exec(f'netsh advfirewall firewall delete rule name="{rule_name}"')
+        return True
+    return False
+
+

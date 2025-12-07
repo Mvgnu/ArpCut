@@ -3,7 +3,9 @@ from pyperclip import copy
 
 from PyQt5.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, \
                             QMenu, QSystemTrayIcon, QAction, QPushButton, \
-                            QDialog, QFormLayout, QDialogButtonBox, QSpinBox
+                            QDialog, QFormLayout, QDialogButtonBox, QSpinBox, \
+                            QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, \
+                            QComboBox, QCheckBox, QLabel, QGroupBox, QLineEdit
 from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtCore import Qt, QTimer
 try:
@@ -24,7 +26,8 @@ from networking.killer import Killer
 from tools.qtools import colored_item, MsgType, Buttons, clickable
 from tools.utils_gui import set_settings, get_settings
 from tools.utils import goto, is_connected, get_default_iface
-from tools.pfctl import ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for
+from tools.pfctl import (ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for,
+                         block_port, unblock_port, is_port_blocked, list_blocked_ports, clear_all_port_blocks)
 
 from assets import *
 
@@ -40,15 +43,42 @@ class LagSwitchDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle('Lag Switch Settings')
         self.setModal(True)
-        layout = QFormLayout(self)
+        self.setMinimumWidth(350)
+        layout = QVBoxLayout(self)
         
-        # Lag duration - how long to block (creates the "lag" freeze)
+        # Direction selection
+        dir_group = QGroupBox('Traffic Direction to Block')
+        dir_layout = QVBoxLayout(dir_group)
+        
+        self.dirBoth = QCheckBox('Both directions (full lag)')
+        self.dirBoth.setChecked(True)
+        self.dirBoth.setToolTip('Block all traffic during lag phase - causes complete freeze')
+        
+        self.dirIncoming = QCheckBox('Incoming only (receive lag)')
+        self.dirIncoming.setToolTip('Block only incoming traffic - you can send but not receive')
+        
+        self.dirOutgoing = QCheckBox('Outgoing only (send lag)')
+        self.dirOutgoing.setToolTip('Block only outgoing traffic - you can receive but not send')
+        
+        # Make them mutually exclusive-ish (both can override)
+        self.dirBoth.toggled.connect(self._on_both_toggled)
+        
+        dir_layout.addWidget(self.dirBoth)
+        dir_layout.addWidget(self.dirIncoming)
+        dir_layout.addWidget(self.dirOutgoing)
+        layout.addWidget(dir_group)
+        
+        # Timing section
+        timing_group = QGroupBox('Timing')
+        timing_layout = QFormLayout(timing_group)
+        
+        # Lag duration - how long to block
         self.lagSpin = QSpinBox(self)
         self.lagSpin.setRange(100, 20000)
         self.lagSpin.setSingleStep(100)
         self.lagSpin.setValue(1500)
         self.lagSpin.setSuffix(' ms')
-        layout.addRow('Lag duration (freeze time)', self.lagSpin)
+        timing_layout.addRow('Lag duration (block time)', self.lagSpin)
         
         # Normal duration - how long connection works normally
         self.normalSpin = QSpinBox(self)
@@ -56,22 +86,238 @@ class LagSwitchDialog(QDialog):
         self.normalSpin.setSingleStep(100)
         self.normalSpin.setValue(1500)
         self.normalSpin.setSuffix(' ms')
-        layout.addRow('Normal duration (connection time)', self.normalSpin)
+        timing_layout.addRow('Normal duration (allow time)', self.normalSpin)
+        
+        layout.addWidget(timing_group)
         
         # Info label
-        from PyQt5.QtWidgets import QLabel
-        info = QLabel('Cycles: Block traffic → Wait lag duration → Allow traffic → Wait normal duration → Repeat')
+        info = QLabel('Cycle: Block selected traffic → Wait lag time → Allow all → Wait normal time → Repeat')
         info.setWordWrap(True)
-        info.setStyleSheet('color: gray; font-size: 10px;')
-        layout.addRow(info)
+        info.setStyleSheet('color: gray; font-size: 10px; padding: 5px;')
+        layout.addWidget(info)
         
+        # Preset buttons
+        preset_layout = QHBoxLayout()
+        preset_layout.addWidget(QLabel('Presets:'))
+        
+        btn_fast = QPushButton('Fast (500/500)')
+        btn_fast.clicked.connect(lambda: self._set_preset(500, 500))
+        preset_layout.addWidget(btn_fast)
+        
+        btn_med = QPushButton('Medium (1500/1500)')
+        btn_med.clicked.connect(lambda: self._set_preset(1500, 1500))
+        preset_layout.addWidget(btn_med)
+        
+        btn_heavy = QPushButton('Heavy (3000/1000)')
+        btn_heavy.clicked.connect(lambda: self._set_preset(3000, 1000))
+        preset_layout.addWidget(btn_heavy)
+        
+        layout.addLayout(preset_layout)
+        
+        # Dialog buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+    
+    def _on_both_toggled(self, checked):
+        if checked:
+            self.dirIncoming.setChecked(False)
+            self.dirOutgoing.setChecked(False)
+    
+    def _set_preset(self, lag, normal):
+        self.lagSpin.setValue(lag)
+        self.normalSpin.setValue(normal)
 
     def values(self):
-        return self.lagSpin.value(), self.normalSpin.value()
+        """Returns (lag_ms, normal_ms, direction)"""
+        direction = 'both'
+        if self.dirIncoming.isChecked() and not self.dirOutgoing.isChecked():
+            direction = 'in'
+        elif self.dirOutgoing.isChecked() and not self.dirIncoming.isChecked():
+            direction = 'out'
+        elif self.dirIncoming.isChecked() and self.dirOutgoing.isChecked():
+            direction = 'both'
+        return self.lagSpin.value(), self.normalSpin.value(), direction
+
+
+class PortBlockerDialog(QDialog):
+    """Dialog for managing blocked ports with instant toggle."""
+    
+    # Common gaming/application ports for quick access
+    COMMON_PORTS = [
+        (80, 'HTTP'),
+        (443, 'HTTPS'),
+        (3074, 'Xbox Live'),
+        (3478, 'PlayStation Network'),
+        (3479, 'PlayStation Network'),
+        (3480, 'PlayStation Network'),
+        (27015, 'Steam/Source Games'),
+        (27016, 'Steam/Source Games'),
+        (6672, 'GTA Online'),
+        (61455, 'GTA Online'),
+        (61456, 'GTA Online'),
+        (61457, 'GTA Online'),
+        (61458, 'GTA Online'),
+        (53, 'DNS'),
+        (25565, 'Minecraft'),
+        (19132, 'Minecraft Bedrock'),
+        (30000, 'Generic Game'),
+        (30001, 'Generic Game'),
+        (7777, 'Game Server'),
+        (7778, 'Game Server'),
+    ]
+    
+    def __init__(self, parent=None, iface=None):
+        super().__init__(parent)
+        self.iface = iface or 'en0'
+        self.setWindowTitle('Port Blocker')
+        self.setModal(False)  # Non-modal so user can keep it open
+        self.setMinimumSize(400, 500)
+        self.setup_ui()
+        self.refresh_list()
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Quick block section
+        quick_group = QGroupBox('Quick Block Port')
+        quick_layout = QHBoxLayout(quick_group)
+        
+        self.portInput = QSpinBox()
+        self.portInput.setRange(1, 65535)
+        self.portInput.setValue(443)
+        quick_layout.addWidget(QLabel('Port:'))
+        quick_layout.addWidget(self.portInput)
+        
+        self.protoCombo = QComboBox()
+        self.protoCombo.addItems(['TCP', 'UDP', 'Both'])
+        quick_layout.addWidget(QLabel('Proto:'))
+        quick_layout.addWidget(self.protoCombo)
+        
+        self.dirCombo = QComboBox()
+        self.dirCombo.addItems(['Both', 'In', 'Out'])
+        quick_layout.addWidget(QLabel('Dir:'))
+        quick_layout.addWidget(self.dirCombo)
+        
+        self.blockBtn = QPushButton('Block')
+        self.blockBtn.clicked.connect(self.quick_block)
+        self.blockBtn.setStyleSheet('background-color: #c0392b; color: white;')
+        quick_layout.addWidget(self.blockBtn)
+        
+        layout.addWidget(quick_group)
+        
+        # Common ports with checkboxes
+        common_group = QGroupBox('Common Ports (Click to Toggle)')
+        common_layout = QVBoxLayout(common_group)
+        
+        self.portList = QListWidget()
+        self.portList.setAlternatingRowColors(True)
+        for port, desc in self.COMMON_PORTS:
+            item = QListWidgetItem(f'{port} - {desc}')
+            item.setData(Qt.UserRole, port)
+            item.setCheckState(Qt.Unchecked)
+            self.portList.addItem(item)
+        self.portList.itemChanged.connect(self.on_item_changed)
+        common_layout.addWidget(self.portList)
+        
+        layout.addWidget(common_group)
+        
+        # Currently blocked ports
+        blocked_group = QGroupBox('Currently Blocked')
+        blocked_layout = QVBoxLayout(blocked_group)
+        
+        self.blockedList = QListWidget()
+        self.blockedList.setAlternatingRowColors(True)
+        blocked_layout.addWidget(self.blockedList)
+        
+        unblock_btn = QPushButton('Unblock Selected')
+        unblock_btn.clicked.connect(self.unblock_selected)
+        blocked_layout.addWidget(unblock_btn)
+        
+        layout.addWidget(blocked_group)
+        
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        
+        refresh_btn = QPushButton('Refresh')
+        refresh_btn.clicked.connect(self.refresh_list)
+        btn_layout.addWidget(refresh_btn)
+        
+        clear_btn = QPushButton('Unblock All')
+        clear_btn.clicked.connect(self.clear_all)
+        clear_btn.setStyleSheet('background-color: #27ae60; color: white;')
+        btn_layout.addWidget(clear_btn)
+        
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def quick_block(self):
+        port = self.portInput.value()
+        proto = self.protoCombo.currentText().lower()
+        direction = self.dirCombo.currentText().lower()
+        
+        if proto == 'both':
+            block_port(self.iface, port, 'tcp', direction)
+            block_port(self.iface, port, 'udp', direction)
+        else:
+            block_port(self.iface, port, proto, direction)
+        
+        self.refresh_list()
+    
+    def on_item_changed(self, item):
+        port = item.data(Qt.UserRole)
+        if item.checkState() == Qt.Checked:
+            # Block this port (both TCP and UDP, both directions)
+            block_port(self.iface, port, 'tcp', 'both')
+            block_port(self.iface, port, 'udp', 'both')
+        else:
+            # Unblock this port
+            unblock_port(port, 'tcp')
+            unblock_port(port, 'udp')
+        self.refresh_blocked_list()
+    
+    def refresh_list(self):
+        """Refresh the blocked ports list and update checkboxes."""
+        self.refresh_blocked_list()
+        
+        # Update checkbox states
+        blocked = list_blocked_ports()
+        blocked_ports = set(p[0] for p in blocked)
+        
+        # Block signals while updating to avoid triggering on_item_changed
+        self.portList.blockSignals(True)
+        for i in range(self.portList.count()):
+            item = self.portList.item(i)
+            port = item.data(Qt.UserRole)
+            item.setCheckState(Qt.Checked if port in blocked_ports else Qt.Unchecked)
+        self.portList.blockSignals(False)
+    
+    def refresh_blocked_list(self):
+        """Refresh just the blocked ports display."""
+        self.blockedList.clear()
+        blocked = list_blocked_ports()
+        seen = set()
+        for port, proto, direction in blocked:
+            key = (port, proto)
+            if key not in seen:
+                seen.add(key)
+                item = QListWidgetItem(f'{port} ({proto.upper()}) - {direction}')
+                item.setData(Qt.UserRole, (port, proto))
+                self.blockedList.addItem(item)
+    
+    def unblock_selected(self):
+        for item in self.blockedList.selectedItems():
+            port, proto = item.data(Qt.UserRole)
+            unblock_port(port, proto)
+        self.refresh_list()
+    
+    def clear_all(self):
+        clear_all_port_blocks()
+        self.refresh_list()
 
 
 class ElmoCut(QMainWindow, Ui_MainWindow):
@@ -96,6 +342,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.lag_block_ms = 1500
         self.lag_release_ms = 1500
         self.lag_device_mac = None
+        self.lag_direction = 'both'  # 'both', 'in', or 'out'
         self.lag_timer = QTimer(self)
         self.lag_timer.setSingleShot(False)
         self.lag_timer.timeout.connect(self._lag_cycle)
@@ -161,6 +408,14 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.btnOneWayKill.setToolTip('One-Way Kill - Block outgoing traffic only (can receive but not send).\nClick to activate, click again to remove.')
         self.gridLayout.addWidget(self.btnOneWayKill, 5, 5, 1, 2)
         self.btnOneWayKill.clicked.connect(self.toggleOneWayKill)
+
+        # Port Blocker button
+        self.btnPortBlocker = QPushButton('Port Blocker', self)
+        self.btnPortBlocker.setMinimumHeight(50)
+        self.btnPortBlocker.setToolTip('Port Blocker - Block specific ports instantly.\nUseful for game exploits and traffic control.')
+        self.gridLayout.addWidget(self.btnPortBlocker, 5, 7, 1, 2)
+        self.btnPortBlocker.clicked.connect(self.openPortBlocker)
+        self.port_blocker_dialog = None  # Lazy init
 
         # "Based on elmoCut" label instead of donate button
         self.lblDonate.setText("Based on elmoCut")
@@ -271,6 +526,17 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         """
         self.about_window.hide()
         self.about_window.show()
+    
+    def openPortBlocker(self):
+        """
+        Open port blocker dialog
+        """
+        if self.port_blocker_dialog is None:
+            iface = self.scanner.iface.name if self.scanner.iface else 'en0'
+            self.port_blocker_dialog = PortBlockerDialog(self, iface)
+        self.port_blocker_dialog.show()
+        self.port_blocker_dialog.raise_()
+        self.port_blocker_dialog.refresh_list()
         self.about_window.setWindowState(Qt.WindowNoState)
 
     def openTraffic(self):
@@ -744,12 +1010,13 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         dlg = LagSwitchDialog(self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        self.lag_block_ms, self.lag_release_ms = dlg.values()
+        self.lag_block_ms, self.lag_release_ms, self.lag_direction = dlg.values()
         self.lag_device_mac = device['mac']
         self.lag_active = True
         self.btnLagSwitch.setText('■ LAGGING')
         self.btnLagSwitch.setStyleSheet(self.BUTTON_ACTIVE_STYLE)
-        self.log(f'Lag switch ON: {self.lag_block_ms}ms lag / {self.lag_release_ms}ms normal', 'orange')
+        dir_text = {'both': 'all', 'in': 'incoming', 'out': 'outgoing'}[self.lag_direction]
+        self.log(f'Lag switch ON: {self.lag_block_ms}ms lag ({dir_text}) / {self.lag_release_ms}ms normal', 'orange')
         self._lag_cycle()
         self.lag_timer.start(self.lag_block_ms + self.lag_release_ms)
 
