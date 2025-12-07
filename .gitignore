@@ -141,3 +141,24 @@ new features.txt
 TODO.txt
 /src/gui/main.py_backup
 /src/tools/restart.exe
+
+# Windows reserved filenames (cause checkout errors)
+nul
+NUL
+con
+CON
+aux
+AUX
+prn
+PRN
+
+# macOS
+.DS_Store
+
+# Build outputs (don't commit binaries - use GitHub Releases)
+ArpCut-macOS.zip
+ArpCut.exe
+ArpCut.dmg
+*.zip
+*.dmg
+*.app

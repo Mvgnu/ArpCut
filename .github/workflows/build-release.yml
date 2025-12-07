@@ -27,8 +27,23 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name ArpCut `
             --add-data "exe/manuf;manuf" `
-            --add-data "exe/icon.ico;." `
             --icon exe/icon.ico `
+            --hidden-import PyQt5 `
+            --hidden-import PyQt5.QtWidgets `
+            --hidden-import PyQt5.QtCore `
+            --hidden-import PyQt5.QtGui `
+            --hidden-import PyQt5.sip `
+            --hidden-import qdarkstyle `
+            --hidden-import scapy `
+            --hidden-import scapy.all `
+            --hidden-import scapy.layers.all `
+            --hidden-import manuf `
+            --hidden-import pyperclip `
+            --hidden-import requests `
+            --hidden-import six `
+            --collect-all manuf `
+            --collect-all scapy `
+            --collect-all qdarkstyle `
             src/elmocut.py
       
       - name: Upload Windows artifact
@@ -51,38 +66,40 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
-          brew install create-dmg
+          pip install pyinstaller pillow
       
       - name: Build macOS App
         run: |
-          pyinstaller --onefile --windowed --name ArpCut \
+          pyinstaller --onedir --windowed --name ArpCut \
             --add-data "exe/manuf:manuf" \
             --icon exe/icon.ico \
+            --hidden-import PyQt5 \
+            --hidden-import PyQt5.QtWidgets \
+            --hidden-import PyQt5.QtCore \
+            --hidden-import PyQt5.QtGui \
+            --hidden-import PyQt5.sip \
+            --hidden-import qdarkstyle \
+            --hidden-import scapy \
+            --hidden-import scapy.all \
+            --hidden-import scapy.layers.all \
+            --hidden-import manuf \
+            --hidden-import pyperclip \
+            --hidden-import requests \
+            --hidden-import six \
+            --collect-all manuf \
+            --collect-all scapy \
+            --collect-all qdarkstyle \
             src/elmocut.py
       
-      - name: Create DMG
+      - name: Create ZIP
         run: |
-          create-dmg \
-            --volname "ArpCut" \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --icon "ArpCut.app" 150 200 \
-            --app-drop-link 450 200 \
-            "ArpCut.dmg" \
-            "dist/ArpCut.app" || true
-          # Fallback: just zip the app if create-dmg fails
-          if [ ! -f ArpCut.dmg ]; then
-            cd dist && zip -r ../ArpCut-macOS.zip ArpCut.app
-          fi
+          cd dist && zip -r ../ArpCut-macOS.zip ArpCut.app
       
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: ArpCut-macOS
-          path: |
-            ArpCut.dmg
-            ArpCut-macOS.zip
+          path: ArpCut-macOS.zip
 
   build-linux:
     runs-on: ubuntu-latest
@@ -109,6 +126,22 @@ jobs:
         run: |
           pyinstaller --onefile --name ArpCut \
             --add-data "exe/manuf:manuf" \
+            --hidden-import PyQt5 \
+            --hidden-import PyQt5.QtWidgets \
+            --hidden-import PyQt5.QtCore \
+            --hidden-import PyQt5.QtGui \
+            --hidden-import PyQt5.sip \
+            --hidden-import qdarkstyle \
+            --hidden-import scapy \
+            --hidden-import scapy.all \
+            --hidden-import scapy.layers.all \
+            --hidden-import manuf \
+            --hidden-import pyperclip \
+            --hidden-import requests \
+            --hidden-import six \
+            --collect-all manuf \
+            --collect-all scapy \
+            --collect-all qdarkstyle \
             src/elmocut.py
       
       - name: Upload Linux artifact
@@ -137,7 +170,6 @@ jobs:
         with:
           files: |
             artifacts/ArpCut-Windows/ArpCut.exe
-            artifacts/ArpCut-macOS/ArpCut.dmg
             artifacts/ArpCut-macOS/ArpCut-macOS.zip
             artifacts/ArpCut-Linux/ArpCut
           draft: false
