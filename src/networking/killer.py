@@ -1,4 +1,4 @@
-from scapy.all import ARP, Ether, conf, L2Socket
+from scapy.all import ARP, Ether, conf
 from time import sleep
 import sys
 
@@ -25,7 +25,7 @@ class Killer:
         if self._socket is None:
             try:
                 iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
-                self._socket = L2Socket(iface=iface)
+                self._socket = conf.L2socket(iface=iface)
             except Exception:
                 self._socket = None
         return self._socket

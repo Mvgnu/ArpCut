@@ -1,4 +1,4 @@
-from scapy.all import IP, Ether, AsyncSniffer, L2Socket
+from scapy.all import IP, Ether, AsyncSniffer, conf
 
 
 class MitmForwarder:
@@ -56,7 +56,7 @@ class MitmForwarder:
 
         # Create persistent L2 socket
         try:
-            self._socket = L2Socket(iface=self.iface)
+            self._socket = conf.L2socket(iface=self.iface)
             if self._debug:
                 print(f"[forwarder] L2 socket created for {self.iface}")
         except Exception as e:
