@@ -55,7 +55,7 @@ class Settings(QMainWindow, Ui_MainWindow):
         is_autoupdate =  self.chkAutoupdate.isChecked()
         iface         =  self.comboInterface.currentText()
 
-        exe_path = os.path.join(os.getcwd(), 'elmocut.exe')
+        exe_path = os.path.join(os.getcwd(), 'ArpCut.exe')
         if is_autostart:
             add_to_startup(exe_path)
         else:

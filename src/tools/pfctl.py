@@ -1,7 +1,7 @@
 import sys
 from subprocess import run, PIPE
 
-ANCHOR = 'com.elmocut'
+ANCHOR = 'com.arpcut'
 
 
 def _exec(cmd):
@@ -36,7 +36,7 @@ def install_anchor():
             conf = f.read()
         if f'anchor "{ANCHOR}"' not in conf and f'load anchor "{ANCHOR}"' not in conf:
             with open('/etc/pf.conf', 'a') as f:
-                f.write(f"\n# elmoCut anchor\nanchor \"{ANCHOR}\"\nload anchor \"{ANCHOR}\" from \"{_anchor_file()}\"\n")
+                f.write(f"\n# ArpCut anchor\nanchor \"{ANCHOR}\"\nload anchor \"{ANCHOR}\" from \"{_anchor_file()}\"\n")
     except Exception:
         return False
     # Load anchor explicitly (avoid full pf.conf reload errors)
@@ -55,7 +55,7 @@ def block_dst(iface: str, victim_ip: str, dst_ip: str, port: int | None = None, 
     if sys.platform != 'darwin':
         # Windows: use netsh advfirewall (simplified - block destination IP)
         if sys.platform.startswith('win'):
-            rule_name = f'elmocut_{victim_ip.replace(".", "_")}_to_{dst_ip.replace(".", "_")}'
+            rule_name = f'arpcut_{victim_ip.replace(".", "_")}_to_{dst_ip.replace(".", "_")}'
             if port:
                 rule_name += f'_p{port}'
             cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=block remoteip={dst_ip} enable=yes'
@@ -84,7 +84,7 @@ def unblock_dst(dst_ip: str, port: int | None = None):
                 lines = res.stdout.splitlines()
                 rule_name = None
                 for line in lines:
-                    if 'elmocut' in line.lower() and dst_ip.replace('.', '_') in line:
+                    if 'arpcut' in line.lower() and dst_ip.replace('.', '_') in line:
                         # Extract rule name from line like "Rule Name: elmocut_..."
                         if 'Rule Name:' in line:
                             rule_name = line.split('Rule Name:')[1].strip()
@@ -148,7 +148,7 @@ def block_all_for(iface: str, victim_ip: str) -> bool:
     if sys.platform != 'darwin':
         # Windows: use netsh advfirewall
         if sys.platform.startswith('win'):
-            rule_name = f'elmocut_block_{victim_ip.replace(".", "_")}'
+            rule_name = f'arpcut_block_{victim_ip.replace(".", "_")}'
             cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=block remoteip={victim_ip} enable=yes'
             res = _exec(cmd)
             return res.returncode == 0
@@ -163,7 +163,7 @@ def unblock_all_for(victim_ip: str) -> bool:
     if sys.platform != 'darwin':
         # Windows: remove firewall rule
         if sys.platform.startswith('win'):
-            rule_name = f'elmocut_block_{victim_ip.replace(".", "_")}'
+            rule_name = f'arpcut_block_{victim_ip.replace(".", "_")}'
             cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
             _exec(cmd)  # Ignore return code (rule may not exist)
             return True

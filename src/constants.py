@@ -4,17 +4,17 @@ import sys
 # Cross-platform settings paths
 if sys.platform.startswith('win'):
     OLD_DOCUMENTS_PATH = path.join(environ.get('USERPROFILE', ''), 'Documents', 'elmocut')
-    DOCUMENTS_PATH = path.join(environ.get('APPDATA', ''), 'elmocut')
+    DOCUMENTS_PATH = path.join(environ.get('APPDATA', ''), 'arpcut')
 else:
     home = environ.get('HOME', '')
     if sys.platform == 'darwin':
-        DOCUMENTS_PATH = path.join(home, 'Library', 'Application Support', 'elmocut')
+        DOCUMENTS_PATH = path.join(home, 'Library', 'Application Support', 'arpcut')
     else:
-        DOCUMENTS_PATH = path.join(home, '.config', 'elmocut')
-    OLD_DOCUMENTS_PATH = DOCUMENTS_PATH
+        DOCUMENTS_PATH = path.join(home, '.config', 'arpcut')
+    OLD_DOCUMENTS_PATH = path.join(home, '.config', 'elmocut') if sys.platform != 'darwin' else path.join(home, 'Library', 'Application Support', 'elmocut')
 
 OLD_SETTINGS_PATH = path.join(OLD_DOCUMENTS_PATH, 'elmocut.json')
-SETTINGS_PATH = path.join(DOCUMENTS_PATH, 'elmocut.json')
+SETTINGS_PATH = path.join(DOCUMENTS_PATH, 'arpcut.json')
 
 TABLE_HEADER_LABELS = ['IP Address', 'MAC Address', 'Vendor', 'Type', 'Nickname']
 

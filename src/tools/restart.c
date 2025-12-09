@@ -6,7 +6,7 @@ int main()
     // Hide Console Window
     ShowWindow(GetConsoleWindow(), SW_HIDE);
     
-    // Start elmocut.exe in a detached process
-    system("start \"\" elmocut");
+    // Start ArpCut.exe in a detached process
+    system("start \"\" ArpCut");
     return 0;
 }

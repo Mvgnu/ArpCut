@@ -32,11 +32,11 @@ def npcap_exists():
 
 def duplicate_elmocut():
     """
-    Check if there is more than 1 instance of elmoCut.exe
+    Check if there is more than 1 instance of ArpCut running
     """
     if sys.platform.startswith('win'):
         tasklist = terminal('tasklist')
-        return tasklist.lower().count('elmocut.exe') > 1
+        return tasklist.lower().count('arpcut.exe') > 1
     # TODO: Implement PID/file lock if needed for macOS
     return False
 
@@ -106,7 +106,7 @@ def migrate_settings_file():
 
 def add_to_startup(exe_path):
     """
-    Add elmoCut to autostart
+    Add ArpCut to autostart
     """
     if sys.platform.startswith('win') and winreg:
         key = winreg.OpenKey(
@@ -117,14 +117,14 @@ def add_to_startup(exe_path):
             )
         winreg.SetValueEx(
             key,
-            'elmocut',
+            'arpcut',
             0,
             winreg.REG_SZ, exe_path
         )
 
 def remove_from_startup():
     """
-    Remove elmoCut from autostart
+    Remove ArpCut from autostart
     """
     if sys.platform.startswith('win') and winreg:
         key = winreg.OpenKey(
@@ -134,6 +134,6 @@ def remove_from_startup():
                 winreg.KEY_WRITE
             )
         try:
-            winreg.DeleteValue(key, 'elmocut')
+            winreg.DeleteValue(key, 'arpcut')
         except FileNotFoundError:
             pass
