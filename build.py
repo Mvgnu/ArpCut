@@ -42,6 +42,7 @@ def build():
         cmd.extend(['--onefile', '--windowed'])
         cmd.extend(['--add-data', 'exe/manuf;manuf'])
         cmd.extend(['--icon', 'exe/icon.ico'])
+        cmd.extend(['--uac-admin'])  # Force admin elevation prompt
     elif system == 'Darwin':  # macOS
         cmd.extend(['--onedir', '--windowed'])
         cmd.extend(['--add-data', 'exe/manuf:manuf'])

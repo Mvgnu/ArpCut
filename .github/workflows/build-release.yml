@@ -28,6 +28,7 @@ jobs:
           pyinstaller --onefile --windowed --name ArpCut `
             --add-data "exe/manuf;manuf" `
             --icon exe/icon.ico `
+            --uac-admin `
             --hidden-import PyQt5 `
             --hidden-import PyQt5.QtWidgets `
             --hidden-import PyQt5.QtCore `
