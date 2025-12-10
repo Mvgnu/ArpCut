@@ -6,6 +6,7 @@ from threading import Thread
 from manuf import manuf
 import sys
 import webbrowser
+import re
 
 from networking.ifaces import NetFace
 from constants import *
@@ -62,95 +63,76 @@ def get_my_ip(iface_name):
     Get interface IP address (cross-platform)
     iface_name must be the Scapy/pcap name (e.g., \\Device\\NPF_{GUID} on Windows, en0 on macOS)
     """
-    if sys.platform.startswith('win'):
-        # Preferred: use scapy route table for given interface
-        try:
-            dst, src_ip, gw = conf.route.route("0.0.0.0", iface=iface_name)
-            if src_ip and src_ip not in ('0.0.0.0', '127.0.0.1'):
-                return src_ip
-        except Exception:
-            pass
-        
-        # Fallback: scan all routes for this iface
-        try:
-            for (dst, mask, gw, iface, src_ip) in conf.route.routes:
-                if iface == iface_name and src_ip not in ('0.0.0.0', '127.0.0.1'):
+    try:
+        conf.route.resync()
+    except Exception:
+        pass
+
+    invalid_ips = ('0.0.0.0', '127.0.0.1', None)
+    iface_name = iface_name or str(conf.iface)
+
+    # Preferred: walk the scapy route table for the specific interface
+    try:
+        for entry in conf.route.routes:
+            if len(entry) >= 5:
+                dst, mask, gw, iface, src_ip = entry[:5]
+                if iface == iface_name and src_ip not in invalid_ips:
                     return src_ip
-        except Exception:
-            pass
-        
-        # Last resort
-        return '127.0.0.1'
-    else:
-        # macOS/Linux: conf.route.route() doesn't support iface kwarg
-        try:
-            result = conf.route.route("0.0.0.0")
-            # result is (iface, src_ip, gateway)
-            if len(result) >= 2 and result[1] and result[1] not in ('0.0.0.0', '127.0.0.1'):
-                return result[1]
-        except Exception:
-            pass
-        
-        # Fallback: walk route table
-        try:
-            for entry in conf.route.routes:
-                if len(entry) >= 5:
-                    dst, mask, gw, iface, src_ip = entry[:5]
-                    if iface == iface_name and src_ip and src_ip not in ('0.0.0.0', '127.0.0.1'):
-                        return src_ip
-        except Exception:
-            pass
-        
-        return '127.0.0.1'
+    except Exception:
+        pass
+
+    # Fallback: use the default route (first non-loopback source IP)
+    try:
+        route_result = conf.route.route("0.0.0.0")
+        if len(route_result) >= 2 and route_result[1] not in invalid_ips:
+            return route_result[1]
+    except Exception:
+        pass
+
+    # Last resort
+    return '127.0.0.1'
 
 def get_gateway_ip(iface_name):
     """
     Get default gateway IP (cross-platform)
     iface_name must be the Scapy/pcap name (e.g., \\Device\\NPF_{GUID} on Windows, en0 on macOS)
     """
-    if sys.platform.startswith('win'):
-        # Preferred: scapy route table with iface filter
-        try:
-            dst, src_ip, gw = conf.route.route("0.0.0.0", iface=iface_name)
-            if gw and gw != '0.0.0.0':
-                return gw
-        except Exception:
-            pass
-        
-        # Fallback: walk the route table
-        try:
-            for (dst, mask, gw, iface, src_ip) in conf.route.routes:
-                if iface == iface_name and gw and gw != '0.0.0.0':
+    try:
+        conf.route.resync()
+    except Exception:
+        pass
+
+    invalid_gws = ('0.0.0.0', None)
+    iface_name = iface_name or str(conf.iface)
+    chosen_gw = None
+
+    try:
+        for entry in conf.route.routes:
+            if len(entry) >= 5:
+                dst, mask, gw, iface, src_ip = entry[:5]
+                # Prefer matches for our interface
+                if iface_name and iface != iface_name:
+                    continue
+                if gw in invalid_gws:
+                    continue
+                # Default route (dst == 0 and mask == 0) is ideal
+                if dst == 0 and mask == 0:
                     return gw
-        except Exception:
-            pass
-        
-        return '0.0.0.0'
-    else:
-        # macOS/Linux: conf.route.route() doesn't support iface kwarg
-        # First try without iface filter
+                if not chosen_gw:
+                    chosen_gw = gw
+    except Exception:
+        pass
+
+    # Fallback: use the gateway from the default route (no iface filter)
+    if not chosen_gw:
         try:
             result = conf.route.route("0.0.0.0")
-            # result is (iface, src_ip, gateway)
-            if len(result) >= 3 and result[2] and result[2] != '0.0.0.0':
-                return result[2]
+            if len(result) >= 3 and result[2] and result[2] not in invalid_gws:
+                chosen_gw = result[2]
         except Exception:
             pass
-        
-        # Fallback: walk route table looking for default route on our iface
-        try:
-            for entry in conf.route.routes:
-                # entry format: (dst, mask, gw, iface, src_ip, metric)
-                if len(entry) >= 5:
-                    dst, mask, gw, iface, src_ip = entry[:5]
-                    # Default route: dst=0, mask=0
-                    if dst == 0 and mask == 0 and gw and gw != '0.0.0.0':
-                        if iface == iface_name or not iface_name:
-                            return gw
-        except Exception:
-            pass
-        
-        return '0.0.0.0'
+
+    return chosen_gw or '0.0.0.0'
 
 def get_gateway_mac(iface_ip, router_ip):
     if sys.platform.startswith('win'):
@@ -228,55 +210,50 @@ def get_ifaces():
                 line = line.strip()
                 if not line:
                     continue
-                # Look for adapter name: "Ethernet adapter Ethernet:"
+                # Look for adapter name: "Ethernet adapter Ethernet:" (works for localized outputs too)
                 if 'adapter' in line.lower() and ':' in line:
-                    # Extract adapter name
-                    parts = line.split(':')
-                    if len(parts) > 0:
-                        adapter_name = parts[-1].strip()
-                        if adapter_name:
+                    # Extract adapter name (text before the colon)
+                    adapter_name = line.split(':', 1)[0].split()[-1]
+                    if adapter_name:
+                        current_adapter = line.split(':', 1)[0].split('adapter')[-1].strip(' :')
+                        if not current_adapter:
                             current_adapter = adapter_name
-                            interface_map[current_adapter] = {'ip': '0.0.0.0', 'mac': GLOBAL_MAC, 'guid': None}
+                        interface_map[current_adapter] = {'ip': '0.0.0.0', 'mac': GLOBAL_MAC, 'guid': None}
                 elif current_adapter:
-                    # Look for IPv4 address
-                    if 'ipv4' in line.lower() or ('ip address' in line.lower() and 'ipv6' not in line.lower()):
-                        if ':' in line:
-                            ip = line.split(':')[-1].strip()
-                            if '.' in ip and ip.count('.') == 3:
-                                try:
-                                    nums = ip.split('.')
-                                    if all(0 <= int(n) <= 255 for n in nums) and ip != '0.0.0.0':
-                                        interface_map[current_adapter]['ip'] = ip
-                                except ValueError:
-                                    pass
-                    # Look for Physical Address (MAC)
-                    elif 'physical address' in line.lower() or 'mac address' in line.lower():
-                        if ':' in line:
-                            mac_part = line.split(':')[-1].strip()
-                            if '-' in mac_part or ':' in mac_part:
-                                interface_map[current_adapter]['mac'] = good_mac(mac_part)
+                    # Look for IPv4 address with a regex to handle "(Preferred)" or localized text
+                    ip_match = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', line)
+                    if ip_match:
+                        ip = ip_match.group(1)
+                        try:
+                            nums = ip.split('.')
+                            if all(0 <= int(n) <= 255 for n in nums) and ip != '0.0.0.0':
+                                interface_map[current_adapter]['ip'] = ip
+                        except ValueError:
+                            pass
+                    # Look for Physical Address (MAC) using regex for locale-agnostic parsing
+                    mac_match = re.search(r'([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})', line)
+                    if mac_match:
+                        interface_map[current_adapter]['mac'] = good_mac(mac_match.group(1))
         
-        # Step 2: Get GUID mapping from netsh
+        # Step 2: Get GUID mapping from netsh (may be localized - best effort)
         netsh_output = terminal('netsh interface show interface')
         guid_to_friendly = {}  # guid -> friendly_name
         if netsh_output:
             for line in netsh_output.split('\n'):
                 line = line.strip()
-                if not line or 'State' in line or 'Type' in line or '---' in line or not line:
+                if not line or '---' in line:
                     continue
-                # Windows format: "Connected    Dedicated    Wi-Fi    {GUID}"
-                # Find GUID in braces
+                # Try to extract GUID in braces if present
                 if '{' in line and '}' in line:
                     guid_start = line.find('{')
                     guid_end = line.find('}', guid_start)
                     if guid_start >= 0 and guid_end > guid_start:
                         guid = line[guid_start+1:guid_end]
-                        # Friendly name is before the GUID
                         friendly = line[:guid_start].strip()
-                        # Take the last part (usually the interface name)
+                        # Take the last token as interface name (works for many locales)
                         friendly_parts = friendly.split()
-                        if len(friendly_parts) >= 3:
-                            friendly = ' '.join(friendly_parts[2:])  # Skip state and type
+                        if friendly_parts:
+                            friendly = friendly_parts[-1]
                         guid_to_friendly[guid] = friendly
         
         # Step 3: Get Scapy interfaces and match with our map
@@ -323,38 +300,53 @@ def get_ifaces():
                 if ip != '0.0.0.0' and ip != '127.0.0.1':
                     found_ip = True
             
-            # Fallback: try to get IP from scapy route table (always try this as fallback)
-            if not found_ip:
-                try:
-                    # Method 1: Try default route
-                    route_result = conf.route.route("0.0.0.0", iface=scapy_name)
-                    if route_result and len(route_result) > 1:
-                        potential_ip = route_result[1]
-                        if potential_ip and potential_ip != '0.0.0.0' and potential_ip != '127.0.0.1':
-                            ip = potential_ip
-                            found_ip = True
-                    
-                    # Method 2: Check all routes for this interface
-                    if not found_ip:
-                        routes = conf.route.routes
-                        for route in routes:
-                            # Route format: (dst, mask, gw, iface, ip)
-                            if len(route) >= 5 and route[3] == scapy_name:
-                                route_ip = route[4]
-                                if route_ip and route_ip != '0.0.0.0' and route_ip != '127.0.0.1':
-                                    ip = route_ip
-                                    found_ip = True
-                                    break
-                except Exception:
-                    pass
-            
             # Try to get MAC from scapy (always try this)
             try:
                 scapy_mac = get_if_hwaddr(scapy_name)
                 if scapy_mac and scapy_mac != '00:00:00:00:00:00':
                     mac = scapy_mac
             except Exception:
-                pass
+                scapy_mac = None
+
+            # If we have a MAC, attempt to match friendly names from ipconfig
+            if not friendly_name and scapy_mac:
+                for friendly, info in interface_map.items():
+                    if info['mac'] != GLOBAL_MAC and good_mac(info['mac']) == good_mac(scapy_mac):
+                        friendly_name = friendly
+                        if info['ip'] not in ('0.0.0.0', '127.0.0.1'):
+                            ip = info['ip']
+                            found_ip = True
+                        break
+            
+            # Fallback: try to get IP from scapy route table (always try this as fallback)
+            if not found_ip:
+                # Method 1: Try default route for this iface (ignore TypeError on newer scapy)
+                try:
+                    route_result = conf.route.route("0.0.0.0", iface=scapy_name)
+                    if route_result and len(route_result) > 1:
+                        potential_ip = route_result[1]
+                        if potential_ip and potential_ip not in ('0.0.0.0', '127.0.0.1'):
+                            ip = potential_ip
+                            found_ip = True
+                except TypeError:
+                    # Newer scapy versions do not accept iface kwarg
+                    pass
+                except Exception:
+                    pass
+
+                # Method 2: Check all routes for this interface
+                if not found_ip:
+                    try:
+                        for route in conf.route.routes:
+                            # Route format: (dst, mask, gw, iface, ip)
+                            if len(route) >= 5 and route[3] == scapy_name:
+                                route_ip = route[4]
+                                if route_ip and route_ip not in ('0.0.0.0', '127.0.0.1'):
+                                    ip = route_ip
+                                    found_ip = True
+                                    break
+                    except Exception:
+                        pass
             
             # Skip only loopback interfaces, but include interfaces even if IP is 0.0.0.0
             # (they might be valid interfaces that just don't have an IP assigned)
