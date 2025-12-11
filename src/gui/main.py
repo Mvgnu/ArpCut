@@ -27,7 +27,8 @@ from tools.qtools import colored_item, MsgType, Buttons, clickable
 from tools.utils_gui import set_settings, get_settings
 from tools.utils import goto, is_connected, get_default_iface
 from tools.pfctl import (ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for,
-                         block_port, unblock_port, is_port_blocked, list_blocked_ports, clear_all_port_blocks)
+                         block_port, unblock_port, is_port_blocked, list_blocked_ports, clear_all_port_blocks,
+                         block_ip, unblock_ip, list_blocked_ips)
 
 from assets import *
 
@@ -207,6 +208,27 @@ class PortBlockerDialog(QDialog):
         
         layout.addWidget(quick_group)
         
+        # IP blocking section
+        ip_group = QGroupBox('Block IP Address')
+        ip_layout = QHBoxLayout(ip_group)
+        
+        self.ipInput = QLineEdit()
+        self.ipInput.setPlaceholderText('e.g. 192.168.1.100')
+        ip_layout.addWidget(QLabel('IP:'))
+        ip_layout.addWidget(self.ipInput)
+        
+        self.ipDirCombo = QComboBox()
+        self.ipDirCombo.addItems(['Both', 'In', 'Out'])
+        ip_layout.addWidget(QLabel('Dir:'))
+        ip_layout.addWidget(self.ipDirCombo)
+        
+        self.blockIpBtn = QPushButton('Block IP')
+        self.blockIpBtn.clicked.connect(self.block_ip_clicked)
+        self.blockIpBtn.setStyleSheet('background-color: #c0392b; color: white;')
+        ip_layout.addWidget(self.blockIpBtn)
+        
+        layout.addWidget(ip_group)
+        
         # Common ports with checkboxes
         common_group = QGroupBox('Common Ports (Click to Toggle)')
         common_layout = QVBoxLayout(common_group)
@@ -268,6 +290,15 @@ class PortBlockerDialog(QDialog):
         
         self.refresh_list()
     
+    def block_ip_clicked(self):
+        ip = self.ipInput.text().strip()
+        if not ip:
+            return
+        direction = self.ipDirCombo.currentText().lower()
+        block_ip(self.iface, ip, direction)
+        self.ipInput.clear()
+        self.refresh_list()
+    
     def on_item_changed(self, item):
         port = item.data(Qt.UserRole)
         if item.checkState() == Qt.Checked:
@@ -297,26 +328,46 @@ class PortBlockerDialog(QDialog):
         self.portList.blockSignals(False)
     
     def refresh_blocked_list(self):
-        """Refresh just the blocked ports display."""
+        """Refresh just the blocked ports and IPs display."""
         self.blockedList.clear()
-        blocked = list_blocked_ports()
+        
+        # Add blocked ports
+        blocked_ports = list_blocked_ports()
         seen = set()
-        for port, proto, direction in blocked:
+        for port, proto, direction in blocked_ports:
             key = (port, proto)
             if key not in seen:
                 seen.add(key)
-                item = QListWidgetItem(f'{port} ({proto.upper()}) - {direction}')
-                item.setData(Qt.UserRole, (port, proto))
+                item = QListWidgetItem(f'Port {port} ({proto.upper()}) - {direction}')
+                item.setData(Qt.UserRole, ('port', port, proto))
+                self.blockedList.addItem(item)
+        
+        # Add blocked IPs
+        blocked_ips = list_blocked_ips()
+        seen_ips = set()
+        for ip, direction in blocked_ips:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                item = QListWidgetItem(f'IP {ip} - {direction}')
+                item.setData(Qt.UserRole, ('ip', ip))
                 self.blockedList.addItem(item)
     
     def unblock_selected(self):
         for item in self.blockedList.selectedItems():
-            port, proto = item.data(Qt.UserRole)
-            unblock_port(port, proto)
+            data = item.data(Qt.UserRole)
+            if data[0] == 'port':
+                _, port, proto = data
+                unblock_port(port, proto)
+            elif data[0] == 'ip':
+                _, ip = data
+                unblock_ip(ip)
         self.refresh_list()
     
     def clear_all(self):
         clear_all_port_blocks()
+        # Also clear blocked IPs
+        for ip, _ in list_blocked_ips():
+            unblock_ip(ip)
         self.refresh_list()
 
 
