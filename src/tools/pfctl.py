@@ -193,6 +193,91 @@ def pf_test_roundtrip(iface: str, victim_ip: str) -> bool:
     return ok1 and present and ok2
 
 
+# ============== IP BLOCKING ==============
+
+def block_ip(iface: str, ip: str, direction: str = 'both') -> bool:
+    """Block all traffic to/from a specific IP."""
+    if sys.platform == 'darwin':
+        rules = []
+        if direction in ('in', 'both'):
+            rules.append(f'block drop quick in on {iface} from {ip} to any')
+        if direction in ('out', 'both'):
+            rules.append(f'block drop quick out on {iface} from any to {ip}')
+        for rule in rules:
+            _exec(f"sh -c 'echo " + '"' + f"{rule}" + '"' + f" >> {_anchor_file()}'")
+        _exec(f"pfctl -a {ANCHOR} -f {_anchor_file()}")
+        return True
+    elif sys.platform.startswith('win'):
+        rule_name = f'arpcut_ip_{ip.replace(".", "_")}'
+        if direction in ('in', 'both'):
+            _exec(f'netsh advfirewall firewall add rule name="{rule_name}_in" dir=in action=block remoteip={ip} enable=yes')
+        if direction in ('out', 'both'):
+            _exec(f'netsh advfirewall firewall add rule name="{rule_name}_out" dir=out action=block remoteip={ip} enable=yes')
+        return True
+    return False
+
+
+def unblock_ip(ip: str) -> bool:
+    """Remove IP blocking rules."""
+    if sys.platform == 'darwin':
+        try:
+            path = _anchor_file()
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            with open(path, 'w') as f:
+                for line in lines:
+                    if f'from {ip} ' not in line and f'to {ip}' not in line:
+                        f.write(line)
+            _exec(f"pfctl -a {ANCHOR} -f {path}")
+            return True
+        except Exception:
+            return False
+    elif sys.platform.startswith('win'):
+        rule_name = f'arpcut_ip_{ip.replace(".", "_")}'
+        _exec(f'netsh advfirewall firewall delete rule name="{rule_name}_in"')
+        _exec(f'netsh advfirewall firewall delete rule name="{rule_name}_out"')
+        return True
+    return False
+
+
+def list_blocked_ips() -> list:
+    """Return list of blocked IPs as [(ip, direction), ...]"""
+    blocked = []
+    if sys.platform == 'darwin':
+        rules = list_rules()
+        for rule in rules:
+            if 'block drop quick' in rule and 'port' not in rule:
+                parts = rule.split()
+                try:
+                    if 'from' in parts and 'to' in parts:
+                        from_idx = parts.index('from')
+                        to_idx = parts.index('to')
+                        from_ip = parts[from_idx + 1]
+                        to_ip = parts[to_idx + 1]
+                        direction = 'in' if ' in on ' in rule else 'out'
+                        if from_ip != 'any':
+                            blocked.append((from_ip, direction))
+                        elif to_ip != 'any':
+                            blocked.append((to_ip, direction))
+                except (ValueError, IndexError):
+                    pass
+    elif sys.platform.startswith('win'):
+        res = _exec('netsh advfirewall firewall show rule name=all')
+        if res.returncode == 0:
+            current_rule = {}
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if line.startswith('Rule Name:'):
+                    name = line.split(':', 1)[1].strip()
+                    if 'arpcut_ip_' in name.lower():
+                        parts = name.split('_')
+                        if len(parts) >= 6:
+                            ip = '.'.join(parts[2:6])
+                            direction = parts[-1] if parts[-1] in ('in', 'out') else 'both'
+                            blocked.append((ip, direction))
+    return blocked
+
+
 # ============== PORT BLOCKING ==============
 
 def block_port(iface: str, port: int, proto: str = 'tcp', direction: str = 'both') -> bool:
