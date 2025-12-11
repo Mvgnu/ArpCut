@@ -32,22 +32,8 @@ def npcap_exists():
 
 def duplicate_elmocut():
     """
-    Check if there is more than 1 instance of ArpCut running
+    One may implement this in the future
     """
-    if sys.platform.startswith('win'):
-        try:
-            tasklist = terminal('tasklist')
-            if not tasklist:
-                return False
-            # Count actual process entries (each on its own line)
-            count = 0
-            for line in tasklist.lower().split('\n'):
-                if 'arpcut.exe' in line:
-                    count += 1
-            return count > 1
-        except Exception:
-            return False
-    # TODO: Implement PID/file lock if needed for macOS
     return False
 
 def check_documents_dir():
