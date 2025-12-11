@@ -6,6 +6,9 @@ Based on [elmoCut](https://github.com/elmoiv/elmocut) by Khaled El-Morshedy (elm
 
 **Author:** Mvgnus (Magnus Ohle)
 
+<img width="879" height="625" alt="Bildschirmfoto 2025-12-11 um 16 31 27" src="https://github.com/user-attachments/assets/5bedfb0d-ee48-42e5-bbb5-1353c71a4ab9" />
+
+
 ---
 
 ## Download
