@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, \
                             QMenu, QSystemTrayIcon, QAction, QPushButton, \
                             QDialog, QFormLayout, QDialogButtonBox, QSpinBox, \
                             QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, \
-                            QComboBox, QCheckBox, QLabel, QGroupBox, QLineEdit
+                            QComboBox, QCheckBox, QLabel, QGroupBox, QLineEdit, QWidget
 from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtCore import Qt, QTimer
 try:
@@ -27,8 +27,8 @@ from tools.qtools import colored_item, MsgType, Buttons, clickable
 from tools.utils_gui import set_settings, get_settings
 from tools.utils import goto, is_connected, get_default_iface
 from tools.pfctl import (ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for,
-                         block_port, unblock_port, is_port_blocked, list_blocked_ports, clear_all_port_blocks,
-                         block_ip, unblock_ip, list_blocked_ips)
+                         block_port, unblock_port, is_port_blocked, list_blocked_ports, clear_all_port_blocks, clear_anchor,
+                         block_ip, unblock_ip, list_blocked_ips, last_error)
 
 from assets import *
 
@@ -143,7 +143,7 @@ class LagSwitchDialog(QDialog):
 
 
 class PortBlockerDialog(QDialog):
-    """Dialog for managing blocked ports with instant toggle."""
+    """Dialog for managing blocked ports for a specific device."""
     
     # Common gaming/application ports for quick access
     COMMON_PORTS = [
@@ -169,17 +169,105 @@ class PortBlockerDialog(QDialog):
         (7778, 'Game Server'),
     ]
     
-    def __init__(self, parent=None, iface=None):
+    # Common IPs to block for game exploits
+    COMMON_IPS = [
+        ('192.81.241.171', 'Rockstar Save Servers'),
+    ]
+    
+    def __init__(self, parent=None, iface=None, target_ip=None, target_mac=None, killer=None, spoof_callback=None):
         super().__init__(parent)
         self.iface = iface or 'en0'
-        self.setWindowTitle('Port Blocker')
-        self.setModal(False)  # Non-modal so user can keep it open
-        self.setMinimumSize(400, 500)
+        self.target_ip = target_ip  # The device we're blocking ports for
+        self.target_mac = target_mac  # MAC of the target device
+        self.killer = killer  # Reference to Killer for checking spoof status
+        self.spoof_callback = spoof_callback  # Callback to trigger spoofing
+        self._update_title()
+        self.setModal(False)
+        self.setMinimumSize(400, 550)
         self.setup_ui()
         self.refresh_list()
+        self._update_spoof_status()
+    
+    def set_target(self, target_ip, target_mac=None):
+        """Update the target device IP and MAC."""
+        self.target_ip = target_ip
+        self.target_mac = target_mac
+        self._update_title()
+        self._update_spoof_status()
+        self.refresh_list()
+    
+    def _update_title(self):
+        if self.target_ip:
+            self.setWindowTitle(f'Port Blocker - {self.target_ip}')
+        else:
+            self.setWindowTitle('Port Blocker - No device selected')
+        self._update_target_label()
+    
+    def _update_target_label(self):
+        if hasattr(self, 'targetLabel'):
+            if self.target_ip:
+                self.targetLabel.setText(f'Target Device: {self.target_ip}')
+                self.targetLabel.setStyleSheet('font-weight: bold; font-size: 14px; padding: 5px; background-color: #27ae60; color: white; border-radius: 3px;')
+            else:
+                self.targetLabel.setText('No device selected - select one from main window')
+                self.targetLabel.setStyleSheet('font-weight: bold; font-size: 14px; padding: 5px; background-color: #c0392b; color: white; border-radius: 3px;')
+    
+    def _is_device_spoofed(self):
+        """Check if the target device is currently being ARP spoofed."""
+        if not self.killer or not self.target_mac:
+            return False
+        return self.target_mac in self.killer.killed
+    
+    def _update_spoof_status(self):
+        """Update the spoof status warning banner."""
+        if not hasattr(self, 'spoofStatusWidget'):
+            return
+        
+        if not self.target_ip or not self.target_mac:
+            self.spoofStatusWidget.hide()
+            return
+        
+        self.spoofStatusWidget.show()
+        
+        if self._is_device_spoofed():
+            self.spoofStatusLabel.setText('✓ Device is spoofed - port blocking active')
+            self.spoofStatusLabel.setStyleSheet('font-weight: bold; padding: 5px; background-color: #27ae60; color: white; border-radius: 3px;')
+            self.spoofNowBtn.hide()
+        else:
+            self.spoofStatusLabel.setText('⚠ Device NOT spoofed - port blocking won\'t work!')
+            self.spoofStatusLabel.setStyleSheet('font-weight: bold; padding: 5px; background-color: #e74c3c; color: white; border-radius: 3px;')
+            self.spoofNowBtn.show()
+    
+    def _on_spoof_clicked(self):
+        """Handle the Spoof Now button click."""
+        if self.spoof_callback:
+            self.spoof_callback()
+            self._update_spoof_status()
     
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        
+        # Target device header
+        self.targetLabel = QLabel()
+        self.targetLabel.setStyleSheet('font-weight: bold; font-size: 14px; padding: 5px; background-color: #2c3e50; color: white; border-radius: 3px;')
+        self._update_target_label()
+        layout.addWidget(self.targetLabel)
+        
+        # Spoof status warning
+        self.spoofStatusWidget = QWidget()
+        spoof_layout = QHBoxLayout(self.spoofStatusWidget)
+        spoof_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.spoofStatusLabel = QLabel()
+        self.spoofStatusLabel.setStyleSheet('font-weight: bold; padding: 5px;')
+        spoof_layout.addWidget(self.spoofStatusLabel, stretch=1)
+        
+        self.spoofNowBtn = QPushButton('Spoof Now')
+        self.spoofNowBtn.setStyleSheet('background-color: #e67e22; color: white; font-weight: bold;')
+        self.spoofNowBtn.clicked.connect(self._on_spoof_clicked)
+        spoof_layout.addWidget(self.spoofNowBtn)
+        
+        layout.addWidget(self.spoofStatusWidget)
         
         # Quick block section
         quick_group = QGroupBox('Quick Block Port')
@@ -228,6 +316,23 @@ class PortBlockerDialog(QDialog):
         ip_layout.addWidget(self.blockIpBtn)
         
         layout.addWidget(ip_group)
+        
+        # IP Presets (for game exploits)
+        ip_preset_group = QGroupBox('IP Presets (Click to Toggle)')
+        ip_preset_layout = QVBoxLayout(ip_preset_group)
+        
+        self.ipPresetList = QListWidget()
+        self.ipPresetList.setAlternatingRowColors(True)
+        self.ipPresetList.setMaximumHeight(80)
+        for ip, desc in self.COMMON_IPS:
+            item = QListWidgetItem(f'{ip} - {desc}')
+            item.setData(Qt.UserRole, ip)
+            item.setCheckState(Qt.Unchecked)
+            self.ipPresetList.addItem(item)
+        self.ipPresetList.itemChanged.connect(self.on_ip_preset_changed)
+        ip_preset_layout.addWidget(self.ipPresetList)
+        
+        layout.addWidget(ip_preset_group)
         
         # Common ports with checkboxes
         common_group = QGroupBox('Common Ports (Click to Toggle)')
@@ -278,54 +383,103 @@ class PortBlockerDialog(QDialog):
         layout.addLayout(btn_layout)
     
     def quick_block(self):
+        if not self.target_ip:
+            QMessageBox.warning(self, 'No Device', 'Select a device first from the main window.')
+            return
+        
         port = self.portInput.value()
         proto = self.protoCombo.currentText().lower()
         direction = self.dirCombo.currentText().lower()
         
+        success = False
         if proto == 'both':
-            block_port(self.iface, port, 'tcp', direction)
-            block_port(self.iface, port, 'udp', direction)
+            success = block_port(self.iface, port, 'tcp', direction, self.target_ip) and block_port(self.iface, port, 'udp', direction, self.target_ip)
         else:
-            block_port(self.iface, port, proto, direction)
+            success = block_port(self.iface, port, proto, direction, self.target_ip)
         
         self.refresh_list()
+        if not success:
+            QMessageBox.warning(self, 'Block Failed', f'Failed to block port.\n\n{last_error() or "On macOS, run with sudo. On Windows, run as Administrator."}')
     
     def block_ip_clicked(self):
         ip = self.ipInput.text().strip()
         if not ip:
             return
         direction = self.ipDirCombo.currentText().lower()
-        block_ip(self.iface, ip, direction)
+        success = block_ip(self.iface, ip, direction)
         self.ipInput.clear()
         self.refresh_list()
+        # Verify rule presence
+        blocked_ips = set(i[0] for i in list_blocked_ips())
+        if not success or ip not in blocked_ips:
+            QMessageBox.warning(self, 'Block Failed', f'Failed to block IP.\n\n{last_error() or "On macOS, run with sudo. On Windows, run as Administrator."}')
     
     def on_item_changed(self, item):
+        if not self.target_ip:
+            # Revert and warn
+            self.portList.blockSignals(True)
+            item.setCheckState(Qt.Unchecked)
+            self.portList.blockSignals(False)
+            QMessageBox.warning(self, 'No Device', 'Select a device first from the main window.')
+            return
+        
         port = item.data(Qt.UserRole)
         if item.checkState() == Qt.Checked:
-            # Block this port (both TCP and UDP, both directions)
-            block_port(self.iface, port, 'tcp', 'both')
-            block_port(self.iface, port, 'udp', 'both')
+            # Block this port for target device (both TCP and UDP)
+            success = block_port(self.iface, port, 'tcp', 'both', self.target_ip) and block_port(self.iface, port, 'udp', 'both', self.target_ip)
+            if not success:
+                # Revert checkbox
+                self.portList.blockSignals(True)
+                item.setCheckState(Qt.Unchecked)
+                self.portList.blockSignals(False)
+                QMessageBox.warning(self, 'Block Failed', f'Failed to block port.\n\n{last_error() or "On macOS, run with sudo. On Windows, run as Administrator."}')
         else:
             # Unblock this port
             unblock_port(port, 'tcp')
             unblock_port(port, 'udp')
         self.refresh_blocked_list()
     
+    def on_ip_preset_changed(self, item):
+        """Handle IP preset checkbox changes - blocks server IPs directly (no device needed)."""
+        ip = item.data(Qt.UserRole)
+        if item.checkState() == Qt.Checked:
+            # Block this IP (blocks traffic to/from this server)
+            success = block_ip(self.iface, ip, 'both')
+            if not success:
+                # Revert checkbox
+                self.ipPresetList.blockSignals(True)
+                item.setCheckState(Qt.Unchecked)
+                self.ipPresetList.blockSignals(False)
+                QMessageBox.warning(self, 'Block Failed', f'Failed to block IP.\n\n{last_error() or "On macOS, run with sudo. On Windows, run as Administrator."}')
+        else:
+            # Unblock this IP
+            unblock_ip(ip)
+        self.refresh_blocked_list()
+    
     def refresh_list(self):
         """Refresh the blocked ports list and update checkboxes."""
         self.refresh_blocked_list()
         
-        # Update checkbox states
+        # Update port checkbox states
         blocked = list_blocked_ports()
         blocked_ports = set(p[0] for p in blocked)
         
-        # Block signals while updating to avoid triggering on_item_changed
         self.portList.blockSignals(True)
         for i in range(self.portList.count()):
             item = self.portList.item(i)
             port = item.data(Qt.UserRole)
             item.setCheckState(Qt.Checked if port in blocked_ports else Qt.Unchecked)
         self.portList.blockSignals(False)
+        
+        # Update IP preset checkbox states
+        blocked_ips = set(ip for ip, _ in list_blocked_ips())
+        
+        self.ipPresetList.blockSignals(True)
+        for i in range(self.ipPresetList.count()):
+            item = self.ipPresetList.item(i)
+            ip = item.data(Qt.UserRole)
+            item.setCheckState(Qt.Checked if ip in blocked_ips else Qt.Unchecked)
+        self.ipPresetList.blockSignals(False)
     
     def refresh_blocked_list(self):
         """Refresh just the blocked ports and IPs display."""
@@ -364,10 +518,8 @@ class PortBlockerDialog(QDialog):
         self.refresh_list()
     
     def clear_all(self):
-        clear_all_port_blocks()
-        # Also clear blocked IPs
-        for ip, _ in list_blocked_ips():
-            unblock_ip(ip)
+        # Clear entire anchor file (removes all port and IP blocks)
+        clear_anchor()
         self.refresh_list()
 
 
@@ -580,15 +732,41 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
     
     def openPortBlocker(self):
         """
-        Open port blocker dialog
+        Open port blocker dialog for selected device
         """
+        # Get selected device IP and MAC
+        target_ip = None
+        target_mac = None
+        selected_device = None
+        if self.tableScan.selectedItems():
+            device = self.current_index()
+            if not device.get('admin'):
+                target_ip = device['ip']
+                target_mac = device['mac']
+                selected_device = device
+        
+        iface = self.scanner.iface.name if self.scanner.iface else 'en0'
+        
+        # Create callback to spoof the selected device
+        def spoof_callback():
+            if selected_device and target_mac not in self.killer.killed:
+                self.killer.kill(selected_device)
+                self.log(f'Started spoofing {target_ip}', 'orange')
+        
         if self.port_blocker_dialog is None:
-            iface = self.scanner.iface.name if self.scanner.iface else 'en0'
-            self.port_blocker_dialog = PortBlockerDialog(self, iface)
+            self.port_blocker_dialog = PortBlockerDialog(
+                self, iface, target_ip, target_mac, 
+                self.killer, spoof_callback
+            )
+        else:
+            self.port_blocker_dialog.iface = iface
+            self.port_blocker_dialog.killer = self.killer
+            self.port_blocker_dialog.spoof_callback = spoof_callback
+            self.port_blocker_dialog.set_target(target_ip, target_mac)
+        
         self.port_blocker_dialog.show()
         self.port_blocker_dialog.raise_()
         self.port_blocker_dialog.refresh_list()
-        self.about_window.setWindowState(Qt.WindowNoState)
 
     def openTraffic(self):
         if not self.tableScan.selectedItems():
@@ -938,7 +1116,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.one_way_kills.discard(device['mac'])
         set_settings('killed', list(self.killer.killed) * self.remember)
         self.log('Unkilled ' + device['ip'], 'lime')
-        
+
         # Update button states
         self._updateFullKillButtonState()
         self._updateOneWayButtonState()
@@ -974,7 +1152,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.one_way_kills.clear()
         set_settings('killed', list(self.killer.killed) * self.remember)
         self.log('Unkilled All devices', 'lime')
-        
+
         # Update button states
         self._updateFullKillButtonState()
         self._updateOneWayButtonState()
@@ -1078,23 +1256,36 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         if not device:
             self.stopLagSwitch()
             return
-        self.killer.kill(device)
-        QTimer.singleShot(self.lag_block_ms, lambda: self._lag_release(device['mac']))
+        
+        # Ensure device is being ARP spoofed
+        if device['mac'] not in self.killer.killed:
+            self.killer.kill(device)
+        
+        # Block traffic using pf (kernel level, instant)
+        iface = self.scanner.iface.name if self.scanner.iface else 'en0'
+        victim_ip = device['ip']
+        block_ip(iface, victim_ip, self.lag_direction)
+        
+        # Schedule unblock after lag duration
+        QTimer.singleShot(self.lag_block_ms, lambda: self._lag_release(victim_ip))
 
-    def _lag_release(self, mac):
+    def _lag_release(self, victim_ip):
         if not self.lag_active:
             return
-        device = self._get_device_by_mac(mac)
-        if device and device['mac'] in self.killer.killed:
-            self.killer.unkill(device)
+        # Unblock traffic
+        unblock_ip(victim_ip)
 
     def stopLagSwitch(self):
         if not self.lag_active:
             return
         self.lag_timer.stop()
         device = self._get_device_by_mac(self.lag_device_mac)
-        if device and device['mac'] in self.killer.killed:
-            self.killer.unkill(device)
+        if device:
+            # Remove any pf blocks
+            unblock_ip(device['ip'])
+            # Unkill (stop ARP spoofing)
+            if device['mac'] in self.killer.killed:
+                self.killer.unkill(device)
         self.lag_active = False
         self.lag_device_mac = None
         self.btnLagSwitch.setText('Lag Switch')

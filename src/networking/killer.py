@@ -1,6 +1,7 @@
 from scapy.all import ARP, Ether, conf
 from time import sleep
 import sys
+import subprocess
 
 from networking.forwarder import MitmForwarder
 from tools.pfctl import ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for
@@ -8,11 +9,29 @@ from tools.utils import threaded, get_default_iface
 from constants import *
 
 
+def enable_ip_forwarding():
+    """Enable kernel-level IP forwarding for fast packet forwarding."""
+    try:
+        if sys.platform == 'darwin':
+            # macOS
+            subprocess.run(['sysctl', '-w', 'net.inet.ip.forwarding=1'], 
+                         capture_output=True, check=False)
+        elif sys.platform.startswith('linux'):
+            # Linux
+            subprocess.run(['sysctl', '-w', 'net.ipv4.ip_forward=1'],
+                         capture_output=True, check=False)
+        # Windows: IP forwarding requires registry changes, skip for now
+    except Exception:
+        pass
+
+
 class Killer:
     def __init__(self, router=DUMMY_ROUTER):
         self.iface = get_default_iface()
         # Use guid (Scapy/pcap name) for conf.iface, not friendly name
         conf.iface = self.iface.guid if self.iface.guid else self.iface.name
+        # Enable kernel IP forwarding for fast MITM
+        enable_ip_forwarding()
         self.router = router
         self.killed = {}
         self.storage = {}
@@ -187,22 +206,24 @@ class Killer:
 
     def one_way_kill(self, victim):
         """
-        Kill victim and ensure traffic is forwarded inbound-only (drop outbound).
-        Uses PF to block outbound at kernel level for guaranteed effect.
+        Kill victim and block their outbound traffic.
+        Uses kernel IP forwarding + pf block (fast, no Python overhead).
+        
+        With sysctl net.inet.ip.forwarding=1:
+        - ARP spoof redirects traffic through us
+        - Kernel forwards packets at native speed
+        - pf blocks outbound from victim (kernel level, instant)
         """
-        # Always ensure victim is being poisoned
+        # Ensure victim is being ARP poisoned
         if victim['mac'] not in self.killed:
             self.kill(victim)
-            # Wait for poison to actually start sending
+            # Wait for poison to start
             for _ in range(10):
                 sleep(0.1)
                 if victim['mac'] in self.killed:
                     break
         
-        # Start forwarder (inbound allowed, outbound dropped in userspace)
-        self._start_one_way_forwarder(victim)
-        
-        # CRITICAL: Block at kernel level with pf so OS can't bypass
+        # Block outbound at kernel level with pf (no slow Python forwarder)
         self._enforce_pf_block(victim['ip'])
 
     def _start_one_way_forwarder(self, victim, debug=False):
