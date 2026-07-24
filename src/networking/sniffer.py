@@ -1,16 +1,23 @@
+"""Real-time traffic sniffer for per-device flow and pattern analysis."""
+import logging
 from collections import defaultdict
+from datetime import datetime
 from threading import Thread, Event
 from time import time
 import sys
+from typing import Optional, Callable, Any
+
+log = logging.getLogger(__name__)
 
 try:
     from scapy.all import sniff, IP, TCP, UDP, Raw
-except Exception:
-    sniff = None
+except ImportError:
+    sniff = None  # type: ignore[assignment]
+    log.warning('scapy not available — traffic sniffing disabled')
 
 
 class TrafficSniffer:
-    def __init__(self):
+    def __init__(self) -> None:
         self._thread = None
         self._stop = Event()
         self._flows = defaultdict(lambda: {
@@ -24,21 +31,21 @@ class TrafficSniffer:
             'packets': 0,
         })
         self._pattern_samples = defaultdict(list)
-        self._callback = None
-        self._iface = None
-        self._victim_ip = None
-        self._last_pkt = None
+        self._callback: Optional[Callable[[], None]] = None
+        self._iface: Optional[str] = None
+        self._victim_ip: Optional[str] = None
+        self._last_pkt: object = None
 
-    def get_flows(self):
+    def get_flows(self) -> dict[tuple[str, int, str], dict[str, Any]]:
         return dict(self._flows)
 
-    def get_last_packet_hex(self):
+    def get_last_packet_hex(self) -> str:
         if self._last_pkt is None:
             return ''
         raw = bytes(self._last_pkt)[:512]
         return ' '.join(f'{b:02x}' for b in raw)
 
-    def get_last_packet_layers(self):
+    def get_last_packet_layers(self) -> dict[str, dict[str, Any]]:
         if self._last_pkt is None:
             return {}
         pkt = self._last_pkt
@@ -69,7 +76,7 @@ class TrafficSniffer:
             payload = bytes(pkt[Raw].load)
             try:
                 printable = payload.decode('utf-8', errors='ignore')
-            except Exception:
+            except (UnicodeDecodeError, ValueError):
                 printable = ''
             info['payload'] = {
                 'length': len(payload),
@@ -77,10 +84,10 @@ class TrafficSniffer:
             }
         return info
 
-    def get_patterns(self):
+    def get_patterns(self) -> dict[tuple[str, int, int], dict[str, int]]:
         return dict(self._patterns)
 
-    def start(self, victim_ip: str, iface: str, on_update=None):
+    def start(self, victim_ip: str, iface: str, on_update: Optional[Callable[[], None]] = None) -> None:
         self.stop()
         self._victim_ip = victim_ip
         self._iface = iface
@@ -89,13 +96,13 @@ class TrafficSniffer:
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         if self._thread and self._thread.is_alive():
             self._stop.set()
             self._thread.join(timeout=1.0)
         self._thread = None
 
-    def _run(self):
+    def _run(self) -> None:
         if sniff is None:
             return
         # BPF filter: traffic to/from victim
@@ -107,13 +114,11 @@ class TrafficSniffer:
                   iface=self._iface,
                   stop_filter=lambda p: self._stop.is_set())
         except PermissionError:
-            # Non-root on macOS: no sniffing; ignore
-            pass
-        except Exception:
-            # Best-effort; do not crash UI
-            pass
+            log.info('Non-root: traffic sniffing unavailable on %s', self._iface)
+        except Exception as e:  # scapy wraps BPF-open denial in Scapy_Exception, not OSError
+            log.warning('Sniffer stopped on %s: %s', self._iface, e)
 
-    def _process(self, pkt):
+    def _process(self, pkt: object) -> None:
         now = time()
         if IP not in pkt:
             return
@@ -137,9 +142,8 @@ class TrafficSniffer:
         flow['proto'] = proto
         # Pattern key: (proto, dst_port, payload_len_bucket)
         try:
-            from scapy.all import Raw
             payload_len = len(bytes(pkt[Raw].load)) if Raw in pkt else 0
-        except Exception:
+        except (AttributeError, IndexError):
             payload_len = 0
         bucket = (payload_len // 32) * 32
         pkey = (proto, int(dport), bucket)
@@ -148,14 +152,12 @@ class TrafficSniffer:
         pat['packets'] += 1
         # Store up to N samples per pattern
         if len(self._pattern_samples[pkey]) < 50:
-            from datetime import datetime
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             preview = ''
             try:
-                from scapy.all import Raw
                 payload = bytes(pkt[Raw].load) if Raw in pkt else b''
                 preview = payload[:64].hex()
-            except Exception:
+            except (AttributeError, IndexError):
                 pass
             dst = ip.dst if ip.src == self._victim_ip else ip.src
             self._pattern_samples[pkey].append({
@@ -167,10 +169,10 @@ class TrafficSniffer:
         if self._callback:
             try:
                 self._callback()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug('Sniffer callback error: %s', e)
 
-    def get_pattern_samples(self, key):
+    def get_pattern_samples(self, key: tuple[str, int, int]) -> list[dict[str, Any]]:
         return list(self._pattern_samples.get(key, []))
 
 

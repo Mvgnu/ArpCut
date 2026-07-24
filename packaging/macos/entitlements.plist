@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-Runtime entitlements for signing ArpCut.app (and the helper).
+
+  The Hardened Runtime does NOT block raw/BPF sockets — those are gated by root
+  (the helper runs as root). These entitlements cover PyInstaller's runtime needs
+  and network access. Sign with:
+
+    codesign --deep --force --options runtime \
+      --entitlements packaging/macos/entitlements.plist \
+      --sign "Developer ID Application: <you>" dist/ArpCut.app
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.network.client</key><true/>
+    <key>com.apple.security.network.server</key><true/>
+</dict>
+</plist>

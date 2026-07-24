@@ -1,33 +1,53 @@
+"""ARP and ICMP network scanning with device discovery."""
+import logging
 from concurrent.futures.thread import ThreadPoolExecutor
 from scapy.all import Ether, arping, conf, get_if_addr
 from time import sleep
 from re import findall
 import sys
-from typing import Optional
+import threading
+from typing import Optional, TypedDict, Callable
+
+log = logging.getLogger(__name__)
 
 from networking.nicknames import Nicknames
-from tools.utils import *
-from constants import *
+from networking.ifaces import NetFace
+from tools.utils import (terminal, threaded, get_vendor, good_mac,
+                         get_my_ip, get_gateway_ip, get_gateway_mac,
+                         get_default_iface, get_iface_by_name)
+from constants import GLOBAL_MAC
+
+
+class DeviceInfo(TypedDict):
+    """Canonical device record used throughout ArpCut."""
+    ip: str
+    mac: str
+    vendor: str
+    type: str  # 'Me' | 'Router' | 'User'
+    name: str
+    admin: bool
+
 
 class Scanner():
-    def __init__(self):
-        self.iface = get_default_iface()
-        self.device_count = 25
-        self.max_threads = 8
-        self.__ping_done = 0
-        self.devices = []
-        self.old_ips = {}
-        self.router = {}
-        self.ips = []
-        self.me = {}
-        self.perfix = None
-        self.qt_progress_signal = int
-        self.qt_log_signal = print
+    def __init__(self) -> None:
+        self.iface: NetFace = get_default_iface()
+        self.device_count: int = 25
+        self.max_threads: int = 8
+        self._lock: threading.Lock = threading.Lock()
+        self.__ping_done: int = 0
+        self.devices: list[DeviceInfo] = []
+        self.old_ips: dict[str, str] = {}  # mac → ip
+        self.router: DeviceInfo = {}  # type: ignore[typeddict-item]
+        self.ips: list[str] = []
+        self.me: DeviceInfo = {}  # type: ignore[typeddict-item]
+        self.perfix: Optional[str] = None
+        self.qt_progress_signal: Callable[[int], object] = int
+        self.qt_log_signal: Callable[..., object] = print
+        self.qt_cancel_flag: Callable[[], bool] = lambda: False
     
-    def generate_ips(self):
-        self.ips = [f'{self.perfix}.{i}' for i in range(1, self.device_count)]
+    def generate_ips(self) -> None:        self.ips = [f'{self.perfix}.{i}' for i in range(1, self.device_count)]
 
-    def init(self):
+    def init(self) -> None:
         """
         Intializing Scanner
         """
@@ -44,7 +64,7 @@ class Scanner():
         self.perfix = self.my_ip.rsplit(".", 1)[0]
         self.generate_ips()
     
-    def flush_arp(self):
+    def flush_arp(self) -> None:
         """
         Flush ARP cache
         """
@@ -52,11 +72,13 @@ class Scanner():
             arp_cmd = terminal('arp -d *')
             if arp_cmd and 'The parameter is incorrect' in arp_cmd:
                 terminal('netsh interface ip delete arpcache')
-        else:
-            # macOS/Linux: flush ARP cache may require sudo; best-effort noop
-            terminal('arp -a > /dev/null | cat')
+        elif sys.platform == 'darwin':
+            # Best-effort flush of the whole ARP cache (needs root).
+            terminal('arp -d -a')
+        else:  # Linux
+            terminal('ip -s -s neigh flush all')
 
-    def add_me(self):
+    def add_me(self) -> None:
         """
         Get My info and append to self.devices
         """
@@ -71,7 +93,7 @@ class Scanner():
         
         self.devices.insert(0, self.me)
 
-    def add_router(self):
+    def add_router(self) -> None:
         """
         Get Gateway info and append to self.devices
         """
@@ -86,9 +108,10 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
-    def devices_appender(self, scan_result):
+    def devices_appender(self, scan_result: list[tuple[str, str]]) -> None:
         """
-        Append scan results to self.devices
+        Append scan results to self.devices.
+        Thread-safe: acquires ``_lock`` before mutating ``self.devices``.
         """
         nicknames = Nicknames()
 
@@ -140,7 +163,7 @@ class Scanner():
         if unique:
             self.flush_arp()
     
-    def arping_cache(self):
+    def arping_cache(self) -> None:
         """
         Showing system arp cache after pinging
         """
@@ -161,7 +184,7 @@ class Scanner():
             scan_result = terminal('arp -an')
         
         if not scan_result:
-            print('ARP error has been caught!')
+            log.warning('ARP cache parse returned empty — no devices found')
             self.devices_appender([])
             return
 
@@ -198,11 +221,11 @@ class Scanner():
                     macs = findall(r'([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', line)
                     if macs:
                         clean_result.append((ip, macs[0]))
-                except Exception:
+                except (ValueError, IndexError):
                     continue
         self.devices_appender(clean_result)
     
-    def arp_scan(self):
+    def arp_scan(self) -> None:
         """
         Scan using Scapy arping method 
         """
@@ -219,7 +242,7 @@ class Scanner():
 
         self.devices_appender(clean_result)
 
-    def ping_scan(self):
+    def ping_scan(self) -> bool:
         """
         Ping all devices at once [CPU Killing function]
            (All Threads will run at the same tine)
@@ -231,6 +254,10 @@ class Scanner():
         self.ping_thread_pool()
         
         while self.__ping_done < self.device_count - 1:
+            # Cooperative cancellation — bridge layer can request abort
+            if self.qt_cancel_flag():
+                log.info('Ping scan cancelled at %d/%d', self.__ping_done, self.device_count - 1)
+                return False
             # Add a sleep to overcome High CPU usage
             sleep(.01)
             self.qt_progress_signal(self.__ping_done)
@@ -238,7 +265,7 @@ class Scanner():
         return True
     
     @threaded
-    def ping_thread_pool(self):
+    def ping_thread_pool(self) -> None:
         """
         Control maximum threads running at once
         """
@@ -246,7 +273,7 @@ class Scanner():
             for ip in self.ips:
                 executor.submit(self.ping, ip)
 
-    def ping(self, ip):
+    def ping(self, ip: str) -> None:
         """
         Ping a specific ip with native command "ping -n"
         """
@@ -255,7 +282,8 @@ class Scanner():
         else:
             # macOS: -W is millis for some ping variants; use higher timeout via -t if available
             terminal(f'ping -c 1 {ip}', decode=False)
-        self.__ping_done += 1
+        with self._lock:
+            self.__ping_done += 1
 
     def probe_ip(self, ip: str) -> Optional[tuple]:
         """
@@ -266,19 +294,18 @@ class Scanner():
         if not hasattr(self, 'my_ip') or not self.my_ip or self.my_ip == '127.0.0.1':
             try:
                 self.init()
-            except Exception as e:
-                print(f'Warning: Scanner init failed in probe_ip: {e}')
+            except (OSError, AttributeError) as e:
+                log.warning('Scanner init failed in probe_ip: %s', e)
         
         # Validate interface
         if self.iface.name == 'NULL':
-            print(f'Warning: Invalid interface for probe_ip({ip})')
+            log.warning('Invalid interface for probe_ip(%s)', ip)
             # Try to reinitialize interface
             try:
-                from tools.utils import get_default_iface
                 self.iface = get_default_iface()
                 self.init()
-            except Exception:
-                pass
+            except (OSError, AttributeError) as e:
+                log.debug('Interface reinit failed in probe_ip: %s', e)
         
         try:
             # 1) Try scapy arping to /32 (requires admin on Windows)
@@ -288,15 +315,14 @@ class Scanner():
                 if hits:
                     self.devices_appender(hits)
                     return hits[0]
-        except Exception as e:
-            # Scapy arping might fail on Windows without admin or Npcap
-            pass
+        except OSError as e:
+            log.debug('Scapy arping failed for %s (fallback to ping): %s', ip, e)
 
         # 2) ICMP ping fallback to populate ARP
         try:
             self.ping(ip)
-        except Exception as e:
-            print(f'Warning: Ping failed for {ip}: {e}')
+        except OSError as e:
+            log.warning('Ping failed for %s: %s', ip, e)
         
         # Small delay to let ARP cache update (longer for Windows)
         from time import sleep
@@ -312,8 +338,8 @@ class Scanner():
             from scapy.all import IP, TCP, sr1
             for port in [53, 80, 443, 3074, 500, 88, 123]:
                 sr1(IP(dst=ip)/TCP(dport=port, flags='S'), timeout=0.5, verbose=0, iface=self.iface.guid)  # Use guid (Scapy/pcap name)
-        except Exception:
-            pass
+        except OSError as e:
+            log.debug('TCP SYN probe failed for %s: %s', ip, e)
 
         # Re-check ARP cache
         return self.probe_ip_arp_cache_only(ip)

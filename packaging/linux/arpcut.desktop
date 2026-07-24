@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ArpCut
+GenericName=Network Control
+Comment=Discover, cut, and shape local-network traffic
+Exec=arpcut
+Icon=arpcut
+Terminal=false
+Categories=Network;Security;System;
+Keywords=arp;network;firewall;cut;netcut;

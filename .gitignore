@@ -162,3 +162,11 @@ ArpCut.dmg
 *.zip
 *.dmg
 *.app
+
+# AI
+.agent/
+.claude/
+
+# diagnostics
+diagnostic_results.json
+kill_diagnostic_results.json

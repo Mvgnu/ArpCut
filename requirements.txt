@@ -1,11 +1,7 @@
 # Core dependencies
-PyQt5>=5.15
-qdarkstyle>=2.8.1
-pyperclip>=1.8.0
-scapy>=2.5.0
-manuf>=1.1.1
-six>=1.16.0
-requests>=2.25.0
+PySide6>=6.7          # Qt6 GUI (LGPL) — frosted-glass UI, controller, dialogs
+scapy>=2.5.0          # raw ARP / packet engine (scanner, killer, sniffer)
+manuf>=1.1.1          # MAC-address vendor lookup
 
-# Build dependencies (optional, for building exe)
+# Build dependencies (optional, for building the app bundle)
 # pyinstaller>=5.0
