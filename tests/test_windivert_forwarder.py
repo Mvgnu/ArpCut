@@ -41,8 +41,9 @@ def test_inbound_only():
 
 
 def test_dst_scoped_filter():
+    # the victim's traffic TO that destination
     f = build_forward_filter('192.168.1.42', dst_ips=['8.8.8.8'])
-    assert f == 'ip and ip.SrcAddr == 192.168.1.42 and ip.DstAddr == 8.8.8.8'
+    assert f == 'ip and (ip.SrcAddr == 192.168.1.42 and ip.DstAddr == 8.8.8.8)'
 
 
 def test_multi_dst_filter():
@@ -50,14 +51,17 @@ def test_multi_dst_filter():
     assert 'ip.DstAddr == 1.1.1.1 or ip.DstAddr == 8.8.8.8' in f
 
 
-def test_port_filter_defaults_tcp():
+def test_port_filter_covers_both_directions_and_src_dst_port():
+    # a port block must catch the port either direction, as src OR dst port
     f = build_forward_filter('192.168.1.42', ports=[443])
-    assert f == 'ip and ip.SrcAddr == 192.168.1.42 and tcp.DstPort == 443'
+    assert f == ('ip and ((ip.SrcAddr == 192.168.1.42 or ip.DstAddr == 192.168.1.42) '
+                 'and (tcp.SrcPort == 443 or tcp.DstPort == 443))')
 
 
 def test_port_filter_udp():
     f = build_forward_filter('192.168.1.42', ports=[3074], proto='udp')
-    assert f.endswith('udp.DstPort == 3074')
+    assert 'udp.SrcPort == 3074 or udp.DstPort == 3074' in f
+    assert 'ip.DstAddr == 192.168.1.42' in f      # inbound to the victim too
 
 
 def test_proto_only_filter():
@@ -70,8 +74,9 @@ def test_dst_and_ports_are_ored_not_anded():
     # not only traffic matching both (the GTA-IP + port-3111 regression).
     f = build_forward_filter('192.168.1.42', dst_ips=['192.81.241.171'],
                              ports=[3111], proto='udp')
-    assert f == ('ip and ip.SrcAddr == 192.168.1.42 and '
-                 '(ip.DstAddr == 192.81.241.171 or udp.DstPort == 3111)')
+    assert f == ('ip and ((ip.SrcAddr == 192.168.1.42 and ip.DstAddr == 192.81.241.171) '
+                 'or ((ip.SrcAddr == 192.168.1.42 or ip.DstAddr == 192.168.1.42) '
+                 'and (udp.SrcPort == 3111 or udp.DstPort == 3111)))')
 
 
 def test_no_direction_raises():

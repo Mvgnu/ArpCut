@@ -161,40 +161,48 @@ def build_forward_filter(
     - ``dst_ips`` narrows the drop to specific destinations (host blocking).
     - ``ports`` + ``proto`` narrow it to specific ports (port blocking).
 
-    Raises ``ValueError`` if neither direction is selected.
+    Each criterion is a self-contained, independent reason to drop, and they are
+    OR'd together:
+
+    - ``dst_ips`` → the victim's traffic *to* that destination
+      (``ip.SrcAddr == victim and ip.DstAddr == d``).
+    - ``ports`` → **all** of the victim's traffic on that port, in either
+      direction and whether it is the source or destination port — a game on
+      port P uses it both ways, so a narrow ``DstPort``-only match leaks.
+    - no criteria → whole-victim drop (cut / one-way / lag), just the direction.
+
+    Raises ``ValueError`` if nothing to match.
     """
-    dirs: list[str] = []
-    if drop_from_victim:
-        dirs.append(f'ip.SrcAddr == {victim_ip}')
-    if drop_to_victim:
-        dirs.append(f'ip.DstAddr == {victim_ip}')
-    if not dirs:
-        raise ValueError('build_forward_filter: at least one direction required')
+    v = victim_ip
+    proto_kw = (proto or '').lower()
+    pk = proto_kw if proto_kw in ('tcp', 'udp') else None
 
-    direction = dirs[0] if len(dirs) == 1 else '(' + ' or '.join(dirs) + ')'
-
-    # Each block criterion (a destination-IP set, a port set, a bare proto) is an
-    # INDEPENDENT reason to drop, so they are OR'd together — a victim blocked
-    # both from GTA's IP and on port 3111 must drop traffic matching *either*, not
-    # only traffic matching both.
     criteria: list[str] = []
     if dst_ips:
-        criteria.append(f'ip.DstAddr == {dst_ips[0]}' if len(dst_ips) == 1
-                        else '(' + ' or '.join(f'ip.DstAddr == {d}' for d in dst_ips) + ')')
-
-    proto_kw = (proto or '').lower()
+        dsts = ' or '.join(f'ip.DstAddr == {d}' for d in dst_ips)
+        dsts = dsts if len(dst_ips) == 1 else '(' + dsts + ')'
+        criteria.append(f'(ip.SrcAddr == {v} and {dsts})')
     if ports:
-        pk = proto_kw if proto_kw in ('tcp', 'udp') else 'tcp'
-        criteria.append(f'{pk}.DstPort == {ports[0]}' if len(ports) == 1
-                        else '(' + ' or '.join(f'{pk}.DstPort == {p}' for p in ports) + ')')
-    elif proto_kw in ('tcp', 'udp'):
-        criteria.append(proto_kw)
+        pp = pk or 'tcp'
+        pc = ' or '.join(f'{pp}.SrcPort == {p} or {pp}.DstPort == {p}' for p in ports)
+        criteria.append(f'((ip.SrcAddr == {v} or ip.DstAddr == {v}) and ({pc}))')
 
-    clauses: list[str] = ['ip', direction]
     if criteria:
-        clauses.append(criteria[0] if len(criteria) == 1
-                       else '(' + ' or '.join(criteria) + ')')
-    return ' and '.join(clauses)
+        body = criteria[0] if len(criteria) == 1 else '(' + ' or '.join(criteria) + ')'
+        return f'ip and {body}'
+
+    # Whole-victim drop (cut / one-way / lag) — no specific flow criteria.
+    dirs: list[str] = []
+    if drop_from_victim:
+        dirs.append(f'ip.SrcAddr == {v}')
+    if drop_to_victim:
+        dirs.append(f'ip.DstAddr == {v}')
+    if not dirs:
+        raise ValueError('build_forward_filter: at least one direction required')
+    direction = dirs[0] if len(dirs) == 1 else '(' + ' or '.join(dirs) + ')'
+    if pk:                                       # bare proto (rare)
+        return f'ip and {direction} and {pk}'
+    return f'ip and {direction}'
 
 
 def validate_filter(filter_str: str) -> tuple[bool, str]:
@@ -319,9 +327,10 @@ class WinDivertForwarder:
         subset reaches here; the allowed traffic never leaves the kernel.
         """
         handle = self._handle
+        log.info('drop loop live: filter=%r', self._filter)
         while self.running and handle is not None:
             try:
-                handle.recv()  # matched == to-drop; we simply never send() it
+                pkt = handle.recv()  # matched == to-drop; we simply never send() it
             except Exception as e:  # noqa: BLE001 - handle closed / shutdown races
                 if self.running:
                     log.debug('WinDivert recv ended: %s', e)
@@ -329,6 +338,13 @@ class WinDivertForwarder:
             with self._lock:
                 self._pkt_count += 1
                 self._drop_count += 1
+                n = self._drop_count
+            if n <= 3 or n % 50 == 0:            # first few + periodic — proof of drops
+                try:
+                    log.info('DROPPED #%d %s:%s -> %s:%s', n, pkt.src_addr,
+                             pkt.src_port, pkt.dst_addr, pkt.dst_port)
+                except Exception:  # noqa: BLE001
+                    log.info('DROPPED #%d (unparsed)', n)
 
     def stop(self) -> None:
         """Stop dropping and close the handle (traffic returns to normal)."""
