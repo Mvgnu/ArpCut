@@ -1,0 +1,42 @@
+
+
+
+PSN DNS block (np.communication.playstation.net) ❌ NOT working
+
+
+
+  ArpCut's DNS block is supposed to forge NXDOMAIN (rcode=3) for the name
+
+  (dnsblock.py:123). Your intercepted query returned the opposite:
+
+  system resolver (192.168.178.1, via MITM):  status: NOERROR  + real SOA from
+
+  ns00.playstation.net   ← passthrough, NOT blocked
+
+  @1.1.1.1 / @8.8.8.8:                          status: NXDOMAIN
+
+                         ← the name's NATURAL public state
+
+  The real upstream answer is passing straight through — no forged NXDOMAIN.
+
+  Heads up: the NXDOMAIN you get from 1.1.1.1/8.8.8.8 is just how this name
+
+  looks publicly; it is not evidence your block works. Don't let that
+
+  false-positive fool you.
+
+
+
+  Three things to check, in order:
+
+ Sniffer interface. The forger has to be watching UDP/53 on the interface
+
+  that sees this Mac's queries — verify it's running and bound to the LAN
+
+  interface.
+
+ Unsure where to go i checked from my now spoofed device and as you can hear from this its not functional atm
+
+  Want me to check the controller/killer state to see whether the DNS sniffer is
+
+  actually started and what target/interface it's bound to?

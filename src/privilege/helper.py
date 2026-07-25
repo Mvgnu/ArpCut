@@ -211,8 +211,18 @@ class Engine:
 
     def start_sniff(self, ip: str) -> bool:
         self._last_flow_push = 0.0
-        self.sniffer.start(ip, self.scanner.iface.name, on_update=self._flow_update)
+        self.sniffer.start(ip, self._scapy_iface(), on_update=self._flow_update)
         return True
+
+    def _scapy_iface(self) -> str:
+        """The pcap/scapy interface id — guid on Windows, name elsewhere.
+
+        Passing the friendly name to scapy fails to capture on Windows (npcap
+        wants the ``\\Device\\NPF_{...}`` guid), which silently broke DNS blocking
+        and traffic capture on this box.
+        """
+        ifc = self.scanner.iface
+        return ifc.guid or ifc.name
 
     def stop_sniff(self) -> bool:
         self.sniffer.stop()
@@ -244,7 +254,7 @@ class Engine:
     def dns_block(self, ip: str, domains: list) -> bool:
         if self._dns is None:
             from networking.dnsblock import DnsSpoofer
-            self._dns = DnsSpoofer(self.scanner.iface.name)
+            self._dns = DnsSpoofer(self._scapy_iface())
         self._dns.block(ip, domains)
         return True
 

@@ -64,3 +64,34 @@ def test_active_reports_targets_and_names():
     sp = DnsSpoofer('lo0')
     sp._targets = {'10.0.0.5': {PSN}}
     assert sp.active() == {'10.0.0.5': [PSN]}
+
+
+# -- WinDivert forward-drop decision (fail-safe) -----------------------------
+
+def _query_payload(qname, tid=0x1234):
+    return bytes(DNS(id=tid, rd=1, qd=DNSQR(qname=qname)))
+
+
+def test_should_drop_only_blocked_query():
+    sp = DnsSpoofer('lo0')
+    sp._targets = {'10.0.0.5': {PSN}}
+    # blocked name from a targeted source → drop the forwarded query
+    assert sp._should_drop_query('10.0.0.5', _query_payload(PSN)) is True
+    assert sp._should_drop_query('10.0.0.5', _query_payload('sub.' + PSN)) is True
+
+
+def test_should_not_drop_allowed_or_wrong_source():
+    sp = DnsSpoofer('lo0')
+    sp._targets = {'10.0.0.5': {PSN}}
+    assert sp._should_drop_query('10.0.0.5', _query_payload('www.google.com')) is False
+    assert sp._should_drop_query('10.0.0.9', _query_payload(PSN)) is False   # wrong source
+    # a DNS *response* (qr=1) is not a query → never dropped
+    resp = bytes(DNS(id=1, qr=1, qd=DNSQR(qname=PSN)))
+    assert sp._should_drop_query('10.0.0.5', resp) is False
+
+
+def test_should_not_drop_on_garbage_payload():
+    sp = DnsSpoofer('lo0')
+    sp._targets = {'10.0.0.5': {PSN}}
+    assert sp._should_drop_query('10.0.0.5', b'') is False
+    assert sp._should_drop_query('10.0.0.5', b'\x00\x01\x02not-dns') is False
