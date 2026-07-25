@@ -82,6 +82,12 @@ class MockEngine:
     def kill(self, mac):
         return self._rec('kill', mac)
 
+    def spoof(self, mac):
+        return self._rec('spoof', mac)
+
+    def lag(self, mac, on):
+        return self._rec('lag', mac, on)
+
     def unkill(self, mac):
         return self._rec('unkill', mac)
 
@@ -300,8 +306,8 @@ def test_controller_monitor_forwards_and_sniffs():
     ops = MockEngine()
     c = _ctrl(ops)
     assert c.start_monitor(PS5) is True
-    assert ('set_forwarding', True) in ops.calls
-    assert ('kill', PS5) in ops.calls
+    assert ('spoof', PS5) in ops.calls             # routed through us (no drop)
+    assert ('kill', PS5) not in ops.calls          # monitoring must not drop traffic
     assert ('start_sniff', '192.168.1.42') in ops.calls
     assert c.state_of(FAKE[2])['monitor'] is True
     assert c.flows()[0]['dst'] == '8.8.8.8'
@@ -313,8 +319,7 @@ def test_controller_dns_block_mitms_then_intercepts():
     ops = MockEngine()
     c = _ctrl(ops)
     c.dns_block(PS5, ['np.communication.playstation.net'])
-    assert ('set_forwarding', True) in ops.calls   # forwarding so device stays online
-    assert ('kill', PS5) in ops.calls              # MITM so its DNS flows through us
+    assert ('spoof', PS5) in ops.calls             # MITM (routed, no drop) so DNS flows through us
     assert any(x[0] == 'dns_block' and x[1] == '192.168.1.42' for x in ops.calls)
     assert c.is_dns_blocked(PS5) and c.state_of(FAKE[2])['dns'] is True
     c.dns_unblock(PS5)
