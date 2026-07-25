@@ -161,14 +161,13 @@ class Engine:
 
     def block_port(self, port: int, proto: str = 'tcp', direction: str = 'both',
                    target_ip=None) -> bool:
-        from tools.firewall import block_port
-        ok = block_port(self.scanner.iface.name, port, proto, direction, target_ip)
-        # Windows: netsh filters only the host itself, not a MITM'd victim's
-        # forwarded traffic. If a victim IP was named, drop that port for the
-        # victim at kernel level (WinDivert) while its other traffic keeps flowing.
+        # Windows + a victim IP: drop that port for the *victim's forwarded*
+        # traffic via WinDivert. Do NOT add a netsh rule — that filters only THIS
+        # host's port (blocks the attacker, does nothing for the victim).
         if sys.platform.startswith('win') and target_ip:
-            self.killer.selective_block(target_ip, ports=[port], proto=proto)
-        return ok
+            return bool(self.killer.selective_block(target_ip, ports=[port], proto=proto))
+        from tools.firewall import block_port
+        return block_port(self.scanner.iface.name, port, proto, direction, target_ip)
 
     def unblock_port(self, port: int, proto: str = 'tcp') -> bool:
         from tools.firewall import unblock_port

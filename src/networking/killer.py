@@ -71,8 +71,17 @@ class Killer:
         self._global_dst_blocks: set[str] = set()
         self._socket: Optional[object] = None  # Persistent L2 socket
         self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
-        # Host-domain blocklist (PSN, GTA, …) over the firewall module.
-        self.hostblock = HostBlocklist()
+        # Host-domain blocklist (PSN, GTA, …). On Windows the netsh firewall
+        # filters only THIS host's traffic — a host block there wrongly cuts the
+        # attacker's own access and does nothing for the forwarded victim. So on
+        # Windows the blocklist just *tracks* resolved IPs (no netsh); the actual
+        # drop is the per-victim WinDivert mirror (_apply_global_dst) + DNS. On
+        # mac/linux the firewall rule sits in the forward chain and is correct.
+        if sys.platform.startswith('win'):
+            self.hostblock = HostBlocklist(block_ip=lambda *a, **k: True,
+                                           unblock_ip=lambda *a, **k: True)
+        else:
+            self.hostblock = HostBlocklist()
 
     def __del__(self) -> None:
         """Best-effort cleanup — close socket if still open."""
