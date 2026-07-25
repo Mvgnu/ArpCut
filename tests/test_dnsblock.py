@@ -95,3 +95,37 @@ def test_should_not_drop_on_garbage_payload():
     sp._targets = {'10.0.0.5': {PSN}}
     assert sp._should_drop_query('10.0.0.5', b'') is False
     assert sp._should_drop_query('10.0.0.5', b'\x00\x01\x02not-dns') is False
+
+
+# -- SNI (TLS ClientHello) domain blocking -----------------------------------
+
+def _client_hello(host: str) -> bytes:
+    from scapy.layers.tls.record import TLS
+    from scapy.layers.tls.handshake import TLSClientHello
+    from scapy.layers.tls.extensions import TLS_Ext_ServerName, ServerName
+    ch = TLS(msg=[TLSClientHello(ext=[TLS_Ext_ServerName(
+        servernames=[ServerName(servername=host.encode())])])])
+    return bytes(ch)
+
+
+def test_parse_tls_sni_extracts_host():
+    from networking.dnsblock import parse_tls_sni
+    assert parse_tls_sni(_client_hello('xbox.com')) == 'xbox.com'
+    assert parse_tls_sni(_client_hello('www.playstation.net')) == 'www.playstation.net'
+
+
+def test_parse_tls_sni_rejects_non_clienthello():
+    from networking.dnsblock import parse_tls_sni
+    assert parse_tls_sni(b'') is None
+    assert parse_tls_sni(b'GET / HTTP/1.1\r\nHost: x\r\n') is None
+    assert parse_tls_sni(b'\x16\x03\x01\x00\x05\x01\x00\x00\x01') is None  # truncated
+
+
+def test_should_drop_sni_only_blocked_host():
+    sp = DnsSpoofer('lo0')
+    sp._targets = {'10.0.0.5': {'xbox.com'}}
+    assert sp._should_drop_sni('10.0.0.5', _client_hello('xbox.com')) is True
+    assert sp._should_drop_sni('10.0.0.5', _client_hello('login.xbox.com')) is True  # subdomain
+    assert sp._should_drop_sni('10.0.0.5', _client_hello('google.com')) is False
+    assert sp._should_drop_sni('10.0.0.9', _client_hello('xbox.com')) is False       # wrong source
+    assert sp._should_drop_sni('10.0.0.5', b'not-tls') is False

@@ -35,6 +35,59 @@ def _name_blocked(qname: str, domains: "set[str]") -> bool:
     return any(qname == d or qname.endswith('.' + d) for d in domains)
 
 
+def parse_tls_sni(payload: bytes) -> "str | None":
+    """Extract the SNI host from a TLS ClientHello, or None.
+
+    Blocking by SNI is the reliable way to block a domain for a MITM'd device:
+    it's independent of DNS (cache/DoH) and of the destination IP (CDN rotation) —
+    we just drop the handshake whose ClientHello names the blocked host. Bounds-
+    checked and never raises; returns None for anything that isn't a ClientHello
+    carrying a server_name extension.
+    """
+    try:
+        b = payload
+        n = len(b)
+        # TLS record: content_type(0x16 handshake) + version(2) + length(2)
+        if n < 43 or b[0] != 0x16:
+            return None
+        p = 5
+        if b[p] != 0x01:                 # handshake type 1 = ClientHello
+            return None
+        p += 4                           # handshake type(1) + length(3)
+        p += 2 + 32                      # client_version(2) + random(32)
+        if p + 1 > n:
+            return None
+        p += 1 + b[p]                    # session_id: len(1) + id
+        if p + 2 > n:
+            return None
+        p += 2 + int.from_bytes(b[p:p + 2], 'big')   # cipher_suites: len(2) + data
+        if p + 1 > n:
+            return None
+        p += 1 + b[p]                    # compression: len(1) + data
+        if p + 2 > n:
+            return None
+        ext_end = min(n, p + 2 + int.from_bytes(b[p:p + 2], 'big'))
+        p += 2
+        while p + 4 <= ext_end:
+            etype = int.from_bytes(b[p:p + 2], 'big')
+            elen = int.from_bytes(b[p + 2:p + 4], 'big')
+            p += 4
+            if etype == 0x0000:          # server_name extension
+                q = p + 2                # skip server_name_list length(2)
+                if q + 3 > n:
+                    return None
+                name_type = b[q]
+                name_len = int.from_bytes(b[q + 1:q + 3], 'big')
+                q += 3
+                if name_type == 0 and q + name_len <= n:
+                    return b[q:q + name_len].decode('ascii', 'ignore').lower()
+                return None
+            p += elen
+        return None
+    except Exception:  # noqa: BLE001 - never raise into the packet loop
+        return None
+
+
 class DnsSpoofer:
     """Blackhole DNS names for specific MITM'd targets by forging NXDOMAIN and
     (on Windows) dropping the real forwarded query so it can't be answered."""
@@ -104,6 +157,15 @@ class DnsSpoofer:
             return self._is_blocked(src_ip, qname)
         except Exception:  # noqa: BLE001 - never drop on uncertainty
             return False
+
+    def _should_drop_sni(self, src_ip: str, payload: bytes) -> bool:
+        """Decide whether a forwarded TCP/443 payload is a blocked-SNI ClientHello.
+
+        Fail-safe: only a positively-parsed ClientHello whose SNI matches a blocked
+        name for the source is dropped; everything else forwards normally.
+        """
+        sni = parse_tls_sni(payload)
+        return bool(sni) and self._is_blocked(src_ip, sni)
 
     # -- capture -------------------------------------------------------------
 
@@ -194,8 +256,11 @@ class DnsSpoofer:
         here can never black-hole the victim's DNS wholesale.
         """
         from pydivert import WinDivert, Layer
-        filt = 'udp.DstPort == 53 and (' + \
-               ' or '.join(f'ip.SrcAddr == {ip}' for ip in ips) + ')'
+        srcs = '(' + ' or '.join(f'ip.SrcAddr == {ip}' for ip in ips) + ')'
+        # DNS queries (UDP/53) for the NXDOMAIN drop, plus TLS ClientHellos
+        # (TCP/443 with a payload) for SNI-based domain blocking.
+        filt = (f'({srcs}) and (udp.DstPort == 53 or '
+                f'(tcp.DstPort == 443 and tcp.PayloadLength > 0))')
         try:
             handle = WinDivert(filt, layer=Layer.NETWORK_FORWARD)
             handle.open()
@@ -210,10 +275,16 @@ class DnsSpoofer:
             except Exception:  # noqa: BLE001 - handle closed on stop
                 break
             payload = bytes(pkt.payload) if pkt.payload else b''
-            drop = self._should_drop_query(str(pkt.src_addr), payload)
+            src = str(pkt.src_addr)
+            if pkt.udp is not None and pkt.dst_port == 53:
+                drop = self._should_drop_query(src, payload)
+            elif pkt.tcp is not None and pkt.dst_port == 443:
+                drop = self._should_drop_sni(src, payload)
+            else:
+                drop = False
             if not drop:
                 try:
-                    handle.send(pkt)           # forward the query normally
+                    handle.send(pkt)           # forward normally
                 except Exception:  # noqa: BLE001
                     pass
-            # else: the blocked query is dropped — the real resolver never answers.
+            # else: blocked — DNS query dies (no answer) / TLS handshake dies.
