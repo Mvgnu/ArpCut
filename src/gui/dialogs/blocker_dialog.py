@@ -161,7 +161,8 @@ class BlockerDialog(Dialog):
             self.ctrl.dns_block(self._target['mac'], preset.domains) if on \
                 else self.ctrl.dns_unblock(self._target['mac'])
         else:
-            self.ctrl.block_host(preset.key) if on else self.ctrl.unblock_host(preset.key)
+            tmac = self._target['mac'] if self._target else None
+            self.ctrl.block_host(preset.key, tmac) if on else self.ctrl.unblock_host(preset.key)
         self._refresh()
 
     # -- target --------------------------------------------------------------
@@ -199,7 +200,7 @@ class BlockerDialog(Dialog):
     def _block_host(self) -> None:
         text = self._host_edit.text().strip()
         if text:
-            self.ctrl.block_host(text)
+            self.ctrl.block_host(text, self._target['mac'] if self._target else None)
             self._host_edit.clear()
 
     # -- active list ---------------------------------------------------------

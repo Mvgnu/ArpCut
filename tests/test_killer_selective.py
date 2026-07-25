@@ -64,3 +64,21 @@ def test_unblock_port_across_all_victims(k):
 def test_selective_block_noop_without_victim_entry(k):
     # unblocking an unknown victim is a harmless no-op
     assert k.selective_unblock('10.0.0.9') is True
+
+
+def test_global_dst_mirrors_to_spoofed_victims(k):
+    # a routed (poisoned) victim
+    k.killed['aa:bb:cc:dd:ee:03'] = {'ip': '192.168.1.42', 'mac': 'aa:bb:cc:dd:ee:03'}
+    k._apply_global_dst({'203.0.113.5', '198.51.100.9'})
+    assert k._global_dst_blocks == {'203.0.113.5', '198.51.100.9'}
+    dsts = k._wd_selective['192.168.1.42']['dsts']
+    assert '203.0.113.5' in dsts and '198.51.100.9' in dsts
+
+
+def test_reconcile_removes_stale_global_dst(k):
+    k.killed['aa:bb:cc:dd:ee:03'] = {'ip': '192.168.1.42', 'mac': 'aa:bb:cc:dd:ee:03'}
+    k._apply_global_dst({'203.0.113.5'})
+    # hostblock has nothing active → reconcile drops the mirrored block
+    k._reconcile_global_dst()
+    assert k._global_dst_blocks == set()
+    assert '203.0.113.5' not in k._wd_selective.get('192.168.1.42', {}).get('dsts', set())

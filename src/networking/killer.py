@@ -65,6 +65,10 @@ class Killer:
         #   of the victim's traffic keeps flowing. Value: {'ports','dsts','proto','fwd'}.
         self._wd_forwarders: dict[str, object] = {}
         self._wd_selective: dict[str, dict] = {}
+        # Destination IPs blocked network-wide (host presets / IP / domain). On
+        # Windows these are mirrored into every spoofed victim's WinDivert drop
+        # (netsh can't filter forwarded traffic); mac/linux use forward-chain rules.
+        self._global_dst_blocks: set[str] = set()
         self._socket: Optional[object] = None  # Persistent L2 socket
         self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
         # Host-domain blocklist (PSN, GTA, …) over the firewall module.
@@ -188,6 +192,10 @@ class Killer:
         # Forward the (un-dropped) traffic at kernel speed so the routed device
         # keeps its connection (sysctl on mac/linux, IPEnableRouter on Windows).
         enable_ip_forwarding()
+        # Windows: a newly-routed device must inherit the active network-wide
+        # destination blocks (mac/linux already catch it via forward-chain rules).
+        if sys.platform.startswith('win') and self._global_dst_blocks:
+            self.selective_block(str(victim['ip']), dst_ips=list(self._global_dst_blocks))
 
     @threaded
     def unkill(self, victim: dict[str, object]) -> None:
@@ -246,6 +254,7 @@ class Killer:
                 self._remove_pf_block(ip)
             wd_ips = list(self._wd_forwarders)
             sel_ips = list(self._wd_selective)
+            self._global_dst_blocks.clear()
         for ip in wd_ips:
             self._remove_windivert_block(ip)
         for ip in sel_ips:
@@ -490,17 +499,58 @@ class Killer:
 
         ``target`` may be a preset key ('psn-comms', 'gta-save'), a bare domain,
         an IP, or an iterable of those. Returns a ``BlockResult``.
+
+        On mac/linux the firewall rule lives in the forward chain, so it already
+        drops every spoofed device's traffic to those IPs. On Windows netsh can't
+        filter forwarded traffic, so we also mirror the destination IPs into each
+        spoofed victim's WinDivert drop.
         """
-        return self.hostblock.block(target, iface or self.iface.name)  # type: ignore[arg-type]
+        result = self.hostblock.block(target, iface or self.iface.name)  # type: ignore[arg-type]
+        if sys.platform.startswith('win'):
+            self._apply_global_dst(getattr(result, 'desired', None) or set())
+        return result
 
     def unblock_host(self, key: str) -> bool:
         """Remove exactly the IPs a previous ``block_host`` installed for ``key``."""
-        return self.hostblock.unblock(key)
+        was = self.hostblock.active().get(key, set())
+        ok = self.hostblock.unblock(key)
+        if sys.platform.startswith('win'):
+            self._reconcile_global_dst()  # drop IPs no key still blocks
+        return ok
 
     def refresh_hosts(self, iface: Optional[str] = None) -> object:
         """Re-resolve active host blocks and reconcile firewall rules (IP rotation)."""
-        return self.hostblock.refresh(iface or self.iface.name)
+        results = self.hostblock.refresh(iface or self.iface.name)
+        if sys.platform.startswith('win'):
+            self._reconcile_global_dst()
+        return results
 
     def active_host_blocks(self) -> dict:
         """Map of active host-block key → currently-blocked IPs."""
         return self.hostblock.active()
+
+    # -- global destination blocks mirrored to spoofed victims (Windows) ------
+
+    def _spoofed_victim_ips(self) -> list[str]:
+        """IPs of every device currently routed through us."""
+        with self._lock:
+            return [str(v['ip']) for v in self.killed.values() if v.get('ip')]
+
+    def _apply_global_dst(self, ips) -> None:
+        """Block destination ``ips`` for every spoofed victim (idempotent)."""
+        ips = {str(i) for i in ips}
+        if not ips:
+            return
+        self._global_dst_blocks |= ips
+        for victim_ip in self._spoofed_victim_ips():
+            self.selective_block(victim_ip, dst_ips=list(ips))
+
+    def _reconcile_global_dst(self) -> None:
+        """Sync the mirrored WinDivert dst-drops to the union of active host IPs."""
+        active = self.hostblock.active()
+        desired: set[str] = set().union(*active.values()) if active else set()
+        stale = self._global_dst_blocks - desired
+        self._global_dst_blocks = set(desired)
+        if stale:
+            for victim_ip in list(self._wd_selective):
+                self.selective_unblock(victim_ip, dst_ips=list(stale))

@@ -504,7 +504,12 @@ class Controller(QObject):
 
     # -- host / port blocking (async — resolves DNS off-thread) --------------
 
-    def block_host(self, target) -> None:
+    def block_host(self, target, device_mac: Optional[str] = None) -> None:
+        # Route the configured device through us so the destination block actually
+        # bites for it (host blocks apply to every spoofed device).
+        if device_mac:
+            self._ensure_spoofed(device_mac)
+            self.states_changed.emit()
         self.status.emit(f'Blocking {target}…', 'accent')
         self._run(lambda: self.ops.block_host(target), self._on_host_block)
 

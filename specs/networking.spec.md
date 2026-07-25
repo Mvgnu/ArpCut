@@ -142,9 +142,11 @@ resolved by the scanner; do not block against the dummy.
 - [x] Selective per-victim drops (`selective_block`/`selective_unblock`/`lag`) via
       scoped WinDivert filters; port blocking with a target IP routes through them
       (`helper.Engine.block_port`). `block_all_for` (Windows) now blocks both directions.
-- [ ] Wire the lag switch (`block_ip` path) and host presets (no victim IP in the
-      API yet) to the WinDivert selective path; needs victim IP threaded through
-      the protocol + e2e validation.
+- [x] Lag switch and host/dst/domain blocks route through the WinDivert selective
+      path on Windows: `lag()` toggles a kernel drop of a spoofed victim, and host
+      blocks mirror their destination IPs into every spoofed victim's WinDivert
+      drop (`_apply_global_dst`/`_reconcile_global_dst`). mac/linux already catch
+      these via forward-chain pf/nft rules. Live e2e validation still recommended.
 - [x] Locale-robust netsh: firewall state via registry (not the localized 'ON'),
       rule readback via the `arpcut_*` token (not the localized 'Rule Name:').
 - [ ] Validate the Linux nft forward-hook chain end-to-end on a real Linux host.
