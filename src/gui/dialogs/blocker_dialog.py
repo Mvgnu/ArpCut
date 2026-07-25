@@ -228,22 +228,8 @@ class BlockerDialog(Dialog):
             toggle.setChecked(checked)
             toggle.blockSignals(False)
 
-        # The active-blocks list needs `netsh show rule name=all` (≈1s with a few
-        # hundred rules) — gather it OFF the GUI thread so the window never freezes
-        # when you add/remove a block, then render on the GUI thread.
-        self.ctrl._run(self._gather_blocks, self._render_blocks)
-
-    def _gather_blocks(self) -> dict:
-        return {
-            'hosts': self.ctrl.active_host_blocks(),
-            'dns': self.ctrl.active_dns_blocks(),
-            'ports': self.ctrl.list_blocked_ports(),
-            'ips': self.ctrl.list_blocked_ips(),
-        }
-
-    def _render_blocks(self, data) -> None:
-        if isinstance(data, Exception) or not isinstance(data, dict):
-            return
+        # Active list is built from tracked state (in-memory, fast) — one row per
+        # name / port / host, each individually removable.
         while self._active_box.count():
             item = self._active_box.takeAt(0)
             w = item.widget()
@@ -251,30 +237,22 @@ class BlockerDialog(Dialog):
                 w.setParent(None)
                 w.deleteLater()
 
-        empty = True
-        for key, ips in data['hosts'].items():
-            empty = False
-            self._active_box.addWidget(self._active_row(
-                f'{key}  ({len(ips)} IP{"s" * (len(ips) != 1)})',
-                lambda k=key: self.ctrl.unblock_host(k)))
-        for ip, names in data['dns'].items():
-            empty = False
-            n = len(names)
-            self._active_box.addWidget(self._active_row(
-                f'DNS · {ip}  ({n} name{"s" * (n != 1)})',
-                lambda i=ip: (self.ctrl.stop_dns_block_ip(i), self._refresh())))
-        for port, proto, direction in data['ports']:
-            empty = False
-            self._active_box.addWidget(self._active_row(
-                f'port {port}/{proto} · {direction}',
-                lambda p=port, pr=proto: (self.ctrl.unblock_port(p, pr), self._refresh())))
-        for ip, direction in data['ips']:
-            empty = False
-            self._active_box.addWidget(self._active_row(
-                f'{ip} · {direction}',
-                lambda i=ip: (self.ctrl.unblock_ip(i), self._refresh())))
-        if empty:
+        items = self.ctrl.active_blocks()
+        if not items:
             self._active_box.addWidget(self.caption('Nothing blocked.'))
+            return
+        for it in items:
+            self._active_box.addWidget(self._active_row(it['label'], self._remover(it)))
+
+    def _remover(self, it: dict):
+        kind = it.get('kind')
+        if kind == 'dns':
+            return lambda: (self.ctrl.dns_unblock_name(it['mac'], it['name']), self._refresh())
+        if kind == 'port':
+            return lambda: (self.ctrl.unblock_port(it['port'], it['proto']), self._refresh())
+        if kind == 'host':
+            return lambda: (self.ctrl.unblock_host(it['key']), self._refresh())
+        return lambda: None
 
     def _active_row(self, text: str, on_remove) -> QWidget:
         w = QWidget()

@@ -103,3 +103,29 @@ def test_restore_all_calls_cleanup():
     assert 'cleanup' in ops.names()
     assert not c.is_spoofed(PS5)
     assert c._port_blocks == {}
+
+
+def test_active_blocks_includes_port_row():
+    c, ops = _ctrl()
+    c.block_port(3074, 'udp', 'both', '192.168.1.42')
+    rows = c.active_blocks()
+    assert any(r['kind'] == 'port' and r['port'] == 3074 for r in rows)
+    assert any('3074/udp' in r['label'] for r in rows)
+
+
+def test_active_blocks_lists_dns_names_individually():
+    c, ops = _ctrl()
+    c._dns_blocks = {PS5: '192.168.1.42'}
+    ops.active_dns_blocks = lambda: {'192.168.1.42': ['xbox.com', 'psn.net']}
+    rows = [r for r in c.active_blocks() if r['kind'] == 'dns']
+    names = sorted(r['name'] for r in rows)
+    assert names == ['psn.net', 'xbox.com']       # one row per name, not grouped
+
+
+def test_dns_unblock_name_calls_engine_per_name():
+    c, ops = _ctrl()
+    c._dns_blocks = {PS5: '192.168.1.42'}
+    ops.active_dns_blocks = lambda: {'192.168.1.42': ['psn.net']}   # one left after removal
+    c.dns_unblock_name(PS5, 'xbox.com')
+    assert any(call[0] == 'dns_unblock_name' and call[1] == ('192.168.1.42', 'xbox.com')
+               for call in ops.calls)

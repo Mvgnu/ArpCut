@@ -121,6 +121,21 @@ class DnsSpoofer:
         else:
             self._restart()
 
+    def unblock_name(self, target_ip: str, name: str) -> None:
+        """Remove a single blocked name for a target (leave its others intact)."""
+        name = name.rstrip('.').lower()
+        with self._lock:
+            doms = self._targets.get(target_ip)
+            if doms:
+                doms.discard(name)
+                if not doms:
+                    self._targets.pop(target_ip, None)
+            empty = not self._targets
+        if empty:
+            self.stop()
+        else:
+            self._restart()
+
     def active(self) -> dict:
         with self._lock:
             return {ip: sorted(doms) for ip, doms in self._targets.items()}

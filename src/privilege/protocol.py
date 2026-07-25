@@ -143,6 +143,8 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
     Command('dns_block', (Arg('ip', is_ipv4), Arg('domains', is_domains)),
             'RPZ-style: NXDOMAIN a device\'s queries for names (e.g. PSN).'),
     Command('dns_unblock', (Arg('ip', is_ipv4),), 'Stop DNS-name blocking for a device.'),
+    Command('dns_unblock_name', (Arg('ip', is_ipv4), Arg('name', is_nonempty_str)),
+            'Stop blocking one DNS name for a device.'),
     Command('active_dns_blocks', desc='Map of target IP → blocked DNS names.'),
 )}
 

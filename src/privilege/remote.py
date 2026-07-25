@@ -144,5 +144,8 @@ class RemoteEngine:
     def dns_unblock(self, ip: str) -> bool:
         return self._call('dns_unblock', ip=ip)
 
+    def dns_unblock_name(self, ip: str, name: str) -> bool:
+        return self._call('dns_unblock_name', ip=ip, name=name)
+
     def active_dns_blocks(self) -> dict:
         return self._call('active_dns_blocks') or {}

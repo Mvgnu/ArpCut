@@ -727,9 +727,58 @@ class Controller(QObject):
     def is_dns_blocked(self, mac: str) -> bool:
         return mac in self._dns_blocks
 
+    def dns_unblock_name(self, mac: str, name: str) -> None:
+        """Stop blocking a single DNS/domain name for a device."""
+        device = self.device_by_mac(mac)
+        ip = self._dns_blocks.get(mac, device['ip'] if device else None)
+        if not ip:
+            return
+        self._safe(lambda: self.ops.dns_unblock_name(ip, name))
+        # A domain typed in the destination field also placed a host IP block under
+        # the same key — clear that too so removing the name removes both.
+        if name in self.active_host_blocks():
+            self._safe(lambda: self.ops.unblock_host(name))
+        if not self.active_dns_blocks().get(ip):     # last name for this device
+            self._dns_blocks.pop(mac, None)
+            self._dns_spoofed.discard(mac)
+            self._maybe_unspoof(mac)
+        self._emit_hosts()
+        self.status.emit(f'Unblocked {name}', 'good')
+        self.states_changed.emit()
+
+    def active_blocks(self) -> list:
+        """All active blocks as flat, per-item rows built from tracked state.
+
+        In-memory (no netsh enumeration), device-scoped, and one row per name /
+        port / host so each can be removed individually.
+        """
+        items: list[dict] = []
+        dns = self.active_dns_blocks()               # {ip: [names]}
+        ip_to_mac = {v: k for k, v in self._dns_blocks.items()}
+        dns_names: set[str] = set()
+        for ip, names in dns.items():
+            mac = ip_to_mac.get(ip)
+            for name in sorted(names):
+                dns_names.add(name)
+                items.append({'kind': 'dns', 'mac': mac, 'name': name,
+                              'label': f'{name}   ·   DNS + TLS block'})
+        mac_to_ip = {d['mac']: d['ip'] for d in self._devices}
+        for mac, ports in self._port_blocks.items():
+            ip = mac_to_ip.get(mac, '?')
+            for port, proto in sorted(ports):
+                items.append({'kind': 'port', 'port': port, 'proto': proto,
+                              'label': f'port {port}/{proto}   ·   {ip}'})
+        for key, ips in self.active_host_blocks().items():
+            if key in dns_names:                     # already shown as a domain row
+                continue
+            items.append({'kind': 'host', 'key': key,
+                          'label': f'{key}   ({len(ips)} IP{"s" * (len(ips) != 1)})'})
+        return items
+
     def active_dns_blocks(self) -> dict:
         try:
-            return self.ops.active_dns_blocks() or {}
+            res = self.ops.active_dns_blocks()
+            return res if isinstance(res, dict) else {}
         except Exception:  # noqa: BLE001
             return {}
 

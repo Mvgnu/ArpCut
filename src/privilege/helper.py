@@ -32,7 +32,7 @@ _MUTATING = {
     'spoof', 'lag',
     'block_all_for', 'unblock_all_for', 'block_ip', 'unblock_ip', 'block_port',
     'unblock_port', 'block_host', 'unblock_host', 'refresh_hosts', 'cleanup',
-    'dns_block', 'dns_unblock',
+    'dns_block', 'dns_unblock', 'dns_unblock_name',
 }
 
 
@@ -262,6 +262,11 @@ class Engine:
             self._dns.unblock(ip)
         return True
 
+    def dns_unblock_name(self, ip: str, name: str) -> bool:
+        if self._dns:
+            self._dns.unblock_name(ip, name)
+        return True
+
     def active_dns_blocks(self) -> dict:
         return self._dns.active() if self._dns else {}
 
@@ -336,6 +341,7 @@ class HelperServer:
             'one_way_kill': lambda: e.one_way_kill(a['mac']),
             'spoof': lambda: e.spoof(a['mac']),
             'lag': lambda: e.lag(a['mac'], a['on']),
+            'dns_unblock_name': lambda: e.dns_unblock_name(a['ip'], a['name']),
             'block_all_for': lambda: e.block_all_for(a['ip']),
             'unblock_all_for': lambda: e.unblock_all_for(a['ip']),
             'block_ip': lambda: e.block_ip(a['ip'], a.get('direction', 'both')),
