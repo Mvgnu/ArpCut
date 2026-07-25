@@ -327,10 +327,9 @@ class WinDivertForwarder:
         subset reaches here; the allowed traffic never leaves the kernel.
         """
         handle = self._handle
-        log.info('drop loop live: filter=%r', self._filter)
         while self.running and handle is not None:
             try:
-                pkt = handle.recv()  # matched == to-drop; we simply never send() it
+                handle.recv()  # matched == to-drop; we simply never send() it
             except Exception as e:  # noqa: BLE001 - handle closed / shutdown races
                 if self.running:
                     log.debug('WinDivert recv ended: %s', e)
@@ -338,13 +337,6 @@ class WinDivertForwarder:
             with self._lock:
                 self._pkt_count += 1
                 self._drop_count += 1
-                n = self._drop_count
-            if n <= 3 or n % 50 == 0:            # first few + periodic — proof of drops
-                try:
-                    log.info('DROPPED #%d %s:%s -> %s:%s', n, pkt.src_addr,
-                             pkt.src_port, pkt.dst_addr, pkt.dst_port)
-                except Exception:  # noqa: BLE001
-                    log.info('DROPPED #%d (unparsed)', n)
 
     def stop(self) -> None:
         """Stop dropping and close the handle (traffic returns to normal)."""

@@ -9,33 +9,6 @@ import sys
 sys.path.append(os.path.dirname(__file__))
 
 
-def _setup_logging() -> None:
-    """Log to a rotating file so packaged (windowed, no-console) runs are
-    diagnosable — the user can share the log after reproducing an issue.
-
-    File: ``%APPDATA%/arpcut/arpcut.log`` (Windows) / the platform config dir.
-    Our own packages log at DEBUG; third-party stays at WARNING.
-    """
-    import logging
-    from logging.handlers import RotatingFileHandler
-    try:
-        from constants import DOCUMENTS_PATH
-        os.makedirs(DOCUMENTS_PATH, exist_ok=True)
-        path = os.path.join(DOCUMENTS_PATH, 'arpcut.log')
-        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2,
-                                      encoding='utf-8')
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)-7s %(name)s: %(message)s'))
-        root = logging.getLogger()
-        root.setLevel(logging.WARNING)
-        root.addHandler(handler)
-        for name in ('networking', 'privilege', 'tools', 'gui'):
-            logging.getLogger(name).setLevel(logging.DEBUG)
-        logging.getLogger(__name__).info('--- ArpCut starting (log at %s) ---', path)
-    except Exception:  # noqa: BLE001 - logging must never break startup
-        pass
-
-
 def _require_npcap() -> None:
     """Windows needs the Npcap driver for raw capture; nudge the user if missing."""
     if not sys.platform.startswith('win'):
@@ -70,7 +43,6 @@ if __name__ == '__main__':
         raise SystemExit(helper_main())
     if '--flush-firewall' in sys.argv:
         raise SystemExit(_flush_firewall())
-    _setup_logging()
     _require_npcap()
     from gui.app import main
     raise SystemExit(main())

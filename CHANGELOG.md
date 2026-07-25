@@ -1,3 +1,20 @@
+## [2.0.1] - 2026-07-25
+- **[New]** Explicit per-device **Spoof** toggle ("route through my PC"): the base
+  for blockers/monitor/lag. Blockers auto-enable it; turning it off warns and clears
+  that device's blocks.
+- **[New]** **Domain blocking that actually holds** on a MITM'd device — DNS
+  NXDOMAIN interception plus **TLS SNI** filtering (drops the handshake by hostname,
+  independent of DNS cache, DoH, or CDN IP rotation). Block any name/IP/domain.
+- **[Fixed] Windows engine now forwards at kernel speed via WinDivert.** Full cut,
+  one-way kill, lag, and per-victim port/destination/host blocks drop the victim's
+  *forwarded* traffic in-kernel — the old `netsh`/`pf`-on-Windows path only ever
+  filtered the attacker's own host (see issue #2). Cut no longer leaks.
+- **[Fixed]** Deep (ping) scan on non-English Windows (locale-independent ARP
+  parsing); flashing console windows on scans/lag; blocker-panel freeze; growing
+  lag; restore-all now clears every block; blocker window scrolls.
+- Ships a direct-launcher `.exe` and an Inno Setup installer (bundles Npcap); CI
+  builds all three platforms behind a pytest gate.
+
 ## [1.0.6] - 2022-02-24
 - **[New]** Double-click any device to add nickname.
 
