@@ -55,7 +55,7 @@ def _ctrl():
 
 def test_port_block_autospoofs_and_tracks():
     c, ops = _ctrl()
-    assert c.block_port(3074, 'udp', 'both', '192.168.1.42') is True
+    c.block_port(3074, 'udp', 'both', '192.168.1.42')   # async; tracks optimistically
     assert 'spoof' in ops.names()               # auto-routed through us
     assert c.is_spoofed(PS5)
     assert c.device_blocks(PS5) == ['1 port block']

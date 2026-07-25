@@ -6,11 +6,13 @@ device*. Three mechanisms:
 * **DNS name** (interception) — while the device is MITM'd, its lookup of the name
   is answered with NXDOMAIN. Works even for names with **no IP** (e.g. PSN comms);
   this is the general form of the PSN preset.
-* **Port** — a firewall rule dropping a port for the device.
-* **Destination IP / domain** — firewall-drops a destination (resolves domains);
-  affects devices routed through ArpCut.
+* **Port** — drops a port for the device (WinDivert on Windows / pf/nft elsewhere).
+* **Destination IP / domain** — a domain is killed by DNS interception (NXDOMAIN)
+  so it can't resolve, with its current IPs dropped as a backstop; a raw IP is
+  dropped directly. Scoped to the routed device you're configuring.
 
-All driven through the Controller — never the firewall/engine directly.
+Everything here is device-scoped: you open it on a device and it auto-routes that
+device through us so the blocks apply. All driven through the Controller.
 """
 from __future__ import annotations
 
@@ -84,11 +86,13 @@ class BlockerDialog(Dialog):
 
         self.content.addWidget(hline())
 
-        # --- block a destination (network-wide) ---
-        self.content.addWidget(self.section('Block a destination IP or domain  ·  network-wide'))
+        # --- block a destination (for the configured device) ---
+        self.content.addWidget(self.section('Block a destination IP or domain  ·  this device'))
         self.content.addWidget(self.caption(
-            'Firewall-drops traffic to this address for every device routed through '
-            'ArpCut. Domains resolve to their current IPs (public-DNS fallback).'))
+            "Blocks this device's traffic to an address. A domain is killed by DNS "
+            "(NXDOMAIN) so it can't even resolve — the reliable way, since sites "
+            'rotate across many IPs; its current IPs are dropped too. A raw IP is '
+            'dropped directly. Auto-routes the device through this PC.'))
         hrow = QHBoxLayout()
         self._host_edit = QLineEdit()
         self._host_edit.setPlaceholderText('e.g. 8.8.8.8  or  matchmaking.example.com')
@@ -193,15 +197,22 @@ class BlockerDialog(Dialog):
         self._refresh()
 
     def _block_port(self) -> None:
-        target_ip = self._target['ip'] if self._target else None
-        self.ctrl.block_port(self._port.value(), self._proto.value(), 'both', target_ip)
+        if not self._require_target('block a port'):
+            return
+        self.ctrl.block_port(self._port.value(), self._proto.value(), 'both',
+                             self._target['ip'])
         self._refresh()
 
     def _block_host(self) -> None:
         text = self._host_edit.text().strip()
-        if text:
-            self.ctrl.block_host(text, self._target['mac'] if self._target else None)
-            self._host_edit.clear()
+        if not text:
+            return
+        if not self._require_target('block a destination'):
+            return
+        # Domains go through DNS (NXDOMAIN) + IP backstop; raw IPs are dst-blocked.
+        self.ctrl.block_destination(text, self._target['mac'])
+        self._host_edit.clear()
+        self._refresh()
 
     # -- active list ---------------------------------------------------------
 

@@ -513,6 +513,25 @@ class Controller(QObject):
         self.status.emit(f'Blocking {target}…', 'accent')
         self._run(lambda: self.ops.block_host(target), self._on_host_block)
 
+    def block_destination(self, target: str, device_mac: Optional[str] = None) -> None:
+        """Block a raw destination the user typed — an IP or a domain.
+
+        A **domain** is blocked primarily by DNS interception (NXDOMAIN) so the
+        device can't even resolve it — IP-blocking a domain is weak because the
+        name still resolves and CDN sites rotate across many IPs. We also
+        IP-block its current addresses as a backstop. A raw **IP** is dst-blocked
+        directly. Everything is scoped to the routed device you're configuring.
+        """
+        from networking.hostblock import _looks_like_ipv4
+        target = target.strip()
+        if not target:
+            return
+        if not _looks_like_ipv4(target) and device_mac:
+            # Domain → DNS NXDOMAIN for this device (the effective block).
+            self.dns_block(device_mac, [target])
+        # Also IP-block the (resolved) addresses as a backstop / for raw IPs.
+        self.block_host(target, device_mac)
+
     def unblock_host(self, key: str) -> None:
         self._run(lambda: self.ops.unblock_host(key), lambda _: self._emit_hosts())
 
@@ -543,26 +562,34 @@ class Controller(QObject):
         return bool(self.active_host_blocks().get(key))
 
     def block_port(self, port: int, proto: str = 'tcp', direction: str = 'both',
-                   target_ip: Optional[str] = None) -> bool:
+                   target_ip: Optional[str] = None) -> None:
         # A device-scoped port block only bites if that device is routed through
         # us — so auto-spoof it (the block ceases if you later stop spoofing).
+        # Run the (blocking) firewall/WinDivert call off the GUI thread so the
+        # window never freezes while netsh works.
         mac = None
         if target_ip:
             dev = next((d for d in self._devices if d['ip'] == target_ip and not d['admin']), None)
             if dev:
                 mac = dev['mac']
                 self._ensure_spoofed(mac)
-        try:
-            ok = bool(self.ops.block_port(port, proto, direction, target_ip))
-        except Exception as exc:  # noqa: BLE001
-            ok = False
-            log.warning('block_port: %s', exc)
-        if ok and mac:
-            self._port_blocks.setdefault(mac, set()).add((port, proto))
-        self.status.emit(f'Blocked port {port}/{proto}' if ok
-                         else 'Port block failed (need root / helper?)', 'danger' if ok else 'warn')
+                # Track optimistically so state (spoof/port list) is consistent
+                # immediately; the async call rolls it back if the block fails.
+                self._port_blocks.setdefault(mac, set()).add((port, proto))
         self.states_changed.emit()
-        return ok
+        self.status.emit(f'Blocking port {port}/{proto}…', 'accent')
+
+        def _done(res):
+            ok = bool(res) and not isinstance(res, Exception)
+            if not ok and mac:
+                self._port_blocks.get(mac, set()).discard((port, proto))
+                self._maybe_unspoof(mac)
+            self.status.emit(f'Blocked port {port}/{proto}' if ok
+                             else 'Port block failed (need root / helper?)',
+                             'danger' if ok else 'warn')
+            self.states_changed.emit()
+
+        self._run(lambda: self.ops.block_port(port, proto, direction, target_ip), _done)
 
     def unblock_port(self, port: int, proto: str = 'tcp') -> None:
         self._safe(lambda: self.ops.unblock_port(port, proto))
