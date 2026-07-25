@@ -1,42 +1,62 @@
+Proof from this Mac: Now returns NXDOMAIN via the system resolver — last check
 
 
 
-PSN DNS block (np.communication.playstation.net) ❌ NOT working
+  it was leaking a real NOERROR/NODATA. Forged NXDOMAIN is landing now.
+
+  ────────────────────────────────────────
+
+  Block: GTA save 192.81.241.171
+
+  Status: ❌ NOT working (regressed)
+
+  Proof from this Mac: TCP :443 and :80 both "succeeded!" — the IP is fully
+
+  reachable. Traceroute now routes out to the Telekom backbone (hops 2–5)
+
+  instead of dying at the MITM like last  time.
+
+  ────────────────────────────────────────
+
+  Block: UDP :3111
+
+  Status: ❌ No effect on this Mac
+
+  Proof from this Mac: UDP:3111 egresses to the internet identically to the
+
+  control trace — nothing is dropping it.
 
 
 
-  ArpCut's DNS block is supposed to forge NXDOMAIN (rcode=3) for the name
-
-  (dnsblock.py:123). Your intercepted query returned the opposite:
-
-  system resolver (192.168.178.1, via MITM):  status: NOERROR  + real SOA from
-
-  ns00.playstation.net   ← passthrough, NOT blocked
-
-  @1.1.1.1 / @8.8.8.8:                          status: NXDOMAIN
-
-                         ← the name's NATURAL public state
-
-  The real upstream answer is passing straight through — no forged NXDOMAIN.
-
-  Heads up: the NXDOMAIN you get from 1.1.1.1/8.8.8.8 is just how this name
-
-  looks publicly; it is not evidence your block works. Don't let that
-
-  false-positive fool you.
+  What this means
 
 
 
-  Three things to check, in order:
+  - Two DNS blocks (xbox + PSN) are solid. Good — PSN is fixed since the last
 
- Sniffer interface. The forger has to be watching UDP/53 on the interface
+  round.
 
-  that sees this Mac's queries — verify it's running and bound to the LAN
+  - GTA save block broke. It was 100% blocked last time; now it's wide open (TCP
 
-  interface.
+  connects succeed). When you added the new blocks, the gta-save rule dropped
 
- Unsure where to go i checked from my now spoofed device and as you can hear from this its not functional atm
+  out of the firewall. Re-toggle the gta-save preset and I'll re-confirm. (The
 
-  Want me to check the controller/killer state to see whether the DNS sniffer is
+  0% ping is just the server ignoring ICMP — TCP proves it's reachable, so don't
 
-  actually started and what target/interface it's bound to?
+  trust ping alone here.)
+
+  - UDP :3111 never took effect against this Mac. The port block lands as a rule
+
+  on the Windows host's own port 3111 — it doesn't touch the traffic the
+
+  Windows box is merely forwarding for the Mac, so a MITM'd device sails right
+
+  through. As built, a port block can't block a victim's port; you'd need it
+
+  scoped to the victim IP as a destination/forward drop, not a local-port rule.
+
+  So: not a config slip on your end — that one won't work regardless of
+
+  toggling.
+

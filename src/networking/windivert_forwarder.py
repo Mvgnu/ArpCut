@@ -171,26 +171,29 @@ def build_forward_filter(
     if not dirs:
         raise ValueError('build_forward_filter: at least one direction required')
 
-    clauses: list[str] = ['ip']
-    # victim direction(s)
-    clauses.append(dirs[0] if len(dirs) == 1 else '(' + ' or '.join(dirs) + ')')
+    direction = dirs[0] if len(dirs) == 1 else '(' + ' or '.join(dirs) + ')'
 
+    # Each block criterion (a destination-IP set, a port set, a bare proto) is an
+    # INDEPENDENT reason to drop, so they are OR'd together — a victim blocked
+    # both from GTA's IP and on port 3111 must drop traffic matching *either*, not
+    # only traffic matching both.
+    criteria: list[str] = []
     if dst_ips:
-        if len(dst_ips) == 1:
-            clauses.append(f'ip.DstAddr == {dst_ips[0]}')
-        else:
-            clauses.append('(' + ' or '.join(f'ip.DstAddr == {d}' for d in dst_ips) + ')')
+        criteria.append(f'ip.DstAddr == {dst_ips[0]}' if len(dst_ips) == 1
+                        else '(' + ' or '.join(f'ip.DstAddr == {d}' for d in dst_ips) + ')')
 
     proto_kw = (proto or '').lower()
     if ports:
         pk = proto_kw if proto_kw in ('tcp', 'udp') else 'tcp'
-        if len(ports) == 1:
-            clauses.append(f'{pk}.DstPort == {ports[0]}')
-        else:
-            clauses.append('(' + ' or '.join(f'{pk}.DstPort == {p}' for p in ports) + ')')
+        criteria.append(f'{pk}.DstPort == {ports[0]}' if len(ports) == 1
+                        else '(' + ' or '.join(f'{pk}.DstPort == {p}' for p in ports) + ')')
     elif proto_kw in ('tcp', 'udp'):
-        clauses.append(proto_kw)
+        criteria.append(proto_kw)
 
+    clauses: list[str] = ['ip', direction]
+    if criteria:
+        clauses.append(criteria[0] if len(criteria) == 1
+                       else '(' + ' or '.join(criteria) + ')')
     return ' and '.join(clauses)
 
 
@@ -286,13 +289,17 @@ class WinDivertForwarder:
         self.victim_ip = victim_ip
         self.drop_from_victim = drop_from_victim
         self.drop_to_victim = drop_to_victim
-        self._count_mode = count
+        self._count_mode = True
         self._pkt_count = 0
         self._drop_count = 0
 
-        flags = Flag.RECV_ONLY if count else Flag.DROP
+        # Drop via a recv loop — matched packets are received and never
+        # re-injected, which drops them. This is the EXACT mechanism the DNS/SNI
+        # blocker uses on NETWORK_FORWARD (verified working on the victim): default
+        # flags, recv, never send. WINDIVERT_FLAG_DROP did not reliably drop
+        # forwarded traffic here, so we don't use it.
         try:
-            self._handle = WinDivert(self._filter, layer=Layer.NETWORK_FORWARD, flags=flags)
+            self._handle = WinDivert(self._filter, layer=Layer.NETWORK_FORWARD)
             self._handle.open()
         except Exception as e:  # noqa: BLE001 - surface driver/permission errors as a clean False
             log.warning('Failed to open WinDivert handle (%s): %s', self._filter, e)
@@ -300,14 +307,13 @@ class WinDivertForwarder:
             return False
 
         self.running = True
-        log.debug('WinDivert forwarder started: filter=%r count=%s', self._filter, count)
-        if count:
-            self._thread = threading.Thread(target=self._drain, name='windivert-fwd', daemon=True)
-            self._thread.start()
+        log.debug('WinDivert forwarder started: filter=%r', self._filter)
+        self._thread = threading.Thread(target=self._drain, name='windivert-fwd', daemon=True)
+        self._thread.start()
         return True
 
     def _drain(self) -> None:
-        """Count-mode loop: receive matched (to-drop) packets and discard them.
+        """Receive matched (to-drop) packets and discard them.
 
         Not re-injecting a received packet is what drops it.  Only the filtered
         subset reaches here; the allowed traffic never leaves the kernel.

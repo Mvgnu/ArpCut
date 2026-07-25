@@ -65,6 +65,15 @@ def test_proto_only_filter():
     assert f == 'ip and ip.SrcAddr == 192.168.1.42 and udp'
 
 
+def test_dst_and_ports_are_ored_not_anded():
+    # A victim blocked from an IP AND on a port must drop traffic matching EITHER,
+    # not only traffic matching both (the GTA-IP + port-3111 regression).
+    f = build_forward_filter('192.168.1.42', dst_ips=['192.81.241.171'],
+                             ports=[3111], proto='udp')
+    assert f == ('ip and ip.SrcAddr == 192.168.1.42 and '
+                 '(ip.DstAddr == 192.81.241.171 or udp.DstPort == 3111)')
+
+
 def test_no_direction_raises():
     with pytest.raises(ValueError):
         build_forward_filter('192.168.1.42', drop_from_victim=False, drop_to_victim=False)
@@ -83,6 +92,8 @@ def test_no_direction_raises():
     {'ports': [80, 443]},
     {'ports': [3074], 'proto': 'udp'},
     {'proto': 'tcp'},
+    {'dst_ips': ['192.81.241.171'], 'ports': [3111], 'proto': 'udp'},   # combined
+    {'dst_ips': ['1.1.1.1', '8.8.8.8'], 'ports': [80, 443]},            # combined multi
 ])
 def test_built_filters_are_engine_valid(kwargs):
     f = build_forward_filter('192.168.1.42', **kwargs)
