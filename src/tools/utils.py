@@ -28,6 +28,12 @@ p: manuf.MacParser = manuf.MacParser()
 # Shell / process helpers
 # ---------------------------------------------------------------------------
 
+# On Windows a --windowed (no-console) app still flashes a console window for
+# every child process (ping, arp, ipconfig, netsh, …). CREATE_NO_WINDOW hides it
+# so the GUI doesn't strobe cmd windows during scans and lag switching.
+NO_WINDOW: int = 0x08000000 if sys.platform.startswith('win') else 0  # CREATE_NO_WINDOW
+
+
 def terminal(command, decode: bool = True) -> Optional[str]:
     """Run a command WITHOUT a shell and return stdout, or None on failure.
 
@@ -40,7 +46,7 @@ def terminal(command, decode: bool = True) -> Optional[str]:
     args = shlex.split(command, posix=not sys.platform.startswith('win')) \
         if isinstance(command, str) else command
     try:
-        out = check_output(args, stderr=subprocess.STDOUT)
+        out = check_output(args, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         return out.decode('utf-8', errors='replace') if decode else None
     except CalledProcessError as e:
         if getattr(e, 'output', None):

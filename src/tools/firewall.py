@@ -22,6 +22,10 @@ from typing import Callable, Optional
 
 ANCHOR: str = 'com.arpcut'
 
+# Windows: hide the console window every netsh/child process would otherwise
+# flash (very visible when the lag switch toggles rules rapidly).
+_NO_WINDOW: int = 0x08000000 if sys.platform.startswith('win') else 0  # CREATE_NO_WINDOW
+
 # ---------------------------------------------------------------------------
 # Error state container — replaces the old ``_LAST_ERR`` global string.
 # ---------------------------------------------------------------------------
@@ -118,7 +122,7 @@ def _exec(cmd) -> CompletedProcess[str]:
     """
     args = shlex.split(cmd, posix=not sys.platform.startswith('win')) \
         if isinstance(cmd, str) else cmd
-    return run(args, stdout=PIPE, stderr=PIPE, text=True)
+    return run(args, stdout=PIPE, stderr=PIPE, text=True, creationflags=_NO_WINDOW)
 
 
 def _netsh_delete_ok(res: CompletedProcess[str]) -> bool:
@@ -879,7 +883,7 @@ _NFT_COMMENT_RE = re.compile(r'comment\s+"([^"]+)"')
 
 
 def _nft_default_run(argv: list[str]) -> CompletedProcess[str]:
-    return run(argv, stdout=PIPE, stderr=PIPE, text=True)
+    return run(argv, stdout=PIPE, stderr=PIPE, text=True, creationflags=_NO_WINDOW)
 
 
 def _norm_protos(proto: str) -> tuple[str, ...]:

@@ -125,11 +125,14 @@ def _refresh_routing_service() -> None:
     non-fatal because the WinDivert forward handle does not depend on it.
     """
     import subprocess
+    no_window = 0x08000000  # CREATE_NO_WINDOW — don't flash a console window
     try:
         subprocess.run(['sc', 'config', 'RemoteAccess', 'start=', 'demand'],
-                       capture_output=True, check=False, timeout=10)
+                       capture_output=True, check=False, timeout=10,
+                       creationflags=no_window)
         subprocess.run(['sc', 'start', 'RemoteAccess'],
-                       capture_output=True, check=False, timeout=15)
+                       capture_output=True, check=False, timeout=15,
+                       creationflags=no_window)
     except (OSError, subprocess.SubprocessError) as e:
         log.debug('RemoteAccess service refresh skipped: %s', e)
 
