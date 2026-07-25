@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 
 from privilege.protocol import (
@@ -150,11 +151,20 @@ class Engine:
     def block_port(self, port: int, proto: str = 'tcp', direction: str = 'both',
                    target_ip=None) -> bool:
         from tools.firewall import block_port
-        return block_port(self.scanner.iface.name, port, proto, direction, target_ip)
+        ok = block_port(self.scanner.iface.name, port, proto, direction, target_ip)
+        # Windows: netsh filters only the host itself, not a MITM'd victim's
+        # forwarded traffic. If a victim IP was named, drop that port for the
+        # victim at kernel level (WinDivert) while its other traffic keeps flowing.
+        if sys.platform.startswith('win') and target_ip:
+            self.killer.selective_block(target_ip, ports=[port], proto=proto)
+        return ok
 
     def unblock_port(self, port: int, proto: str = 'tcp') -> bool:
         from tools.firewall import unblock_port
-        return unblock_port(port, proto)
+        ok = unblock_port(port, proto)
+        if sys.platform.startswith('win'):
+            self.killer.selective_unblock_port(port)
+        return ok
 
     def list_blocked_ports(self) -> list:
         from tools.firewall import list_blocked_ports

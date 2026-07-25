@@ -140,6 +140,52 @@ def _netsh_delete_ok(res: CompletedProcess[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Locale-independent Windows helpers
+#
+# netsh output is localized: the firewall state prints 'ON'/'EIN'/... and each
+# rule is prefixed with a localized 'Rule Name:'/'Regelname:' label. Parsing
+# those English words silently breaks on non-English Windows (blocks look
+# applied but readback/cleanup find nothing). These helpers avoid the localized
+# text entirely — the registry for state, the ``arpcut_*`` token for rule names.
+# ---------------------------------------------------------------------------
+
+_ARPCUT_RULE_RE = re.compile(r'arpcut_[A-Za-z0-9_]+')
+
+
+def _win_firewall_enabled() -> bool:
+    """True if any Windows Firewall profile is enabled (reads the registry)."""
+    if not sys.platform.startswith('win'):
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+    base = (r'SYSTEM\CurrentControlSet\Services\SharedAccess'
+            r'\Parameters\FirewallPolicy')
+    for prof in ('DomainProfile', 'StandardProfile', 'PublicProfile'):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base + '\\' + prof) as k:
+                if int(winreg.QueryValueEx(k, 'EnableFirewall')[0]) == 1:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _arpcut_rule_names_in(text: str) -> list[str]:
+    """Return the distinct ``arpcut_*`` rule names in netsh show-rule output.
+
+    Matches the rule-name token directly, ignoring the localized label, so it
+    works regardless of the Windows display language.
+    """
+    seen: list[str] = []
+    for m in _ARPCUT_RULE_RE.finditer(text):
+        if m.group(0) not in seen:
+            seen.append(m.group(0))
+    return seen
+
+
+# ---------------------------------------------------------------------------
 # PF rule helpers
 # ---------------------------------------------------------------------------
 
@@ -363,14 +409,20 @@ def block_all_for(iface: str, victim_ip: str) -> bool:
         rule = f'block drop quick on {iface} from {victim_ip} to any'
         return _write_pf_rules([rule], replace=False)
     elif sys.platform.startswith('win'):
-        rule_name = f'arpcut_block_{victim_ip.replace(".", "_")}'
-        cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=out action=block remoteip={victim_ip} enable=yes'
-        res = _exec(cmd)
-        if res.returncode != 0:
-            _err.set(res.stderr or res.stdout or 'netsh failed')
-        else:
+        # Block BOTH directions — outbound (to the victim IP) and inbound (from
+        # it). Outbound-only left devices able to receive, so the cut was partial.
+        base = f'arpcut_block_{victim_ip.replace(".", "_")}'
+        ok = True
+        for direction in ('out', 'in'):
+            res = _exec(
+                f'netsh advfirewall firewall add rule name="{base}_{direction}" '
+                f'dir={direction} action=block remoteip={victim_ip} enable=yes')
+            if res.returncode != 0:
+                _err.set(res.stderr or res.stdout or 'netsh failed')
+                ok = False
+        if ok:
             _err.clear()
-        return res.returncode == 0
+        return ok
     return False
 
 
@@ -385,9 +437,13 @@ def unblock_all_for(victim_ip: str) -> bool:
     if sys.platform == 'darwin':
         return _remove_rules_where(lambda line: _pf_line_targets_ip(line, victim_ip))
     elif sys.platform.startswith('win'):
-        rule_name = f'arpcut_block_{victim_ip.replace(".", "_")}'
-        cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
-        return _netsh_delete_ok(_exec(cmd))
+        base = f'arpcut_block_{victim_ip.replace(".", "_")}'
+        ok = True
+        # Delete the split rules plus the legacy single-name rule (older builds).
+        for name in (f'{base}_out', f'{base}_in', base):
+            ok = _netsh_delete_ok(_exec(
+                f'netsh advfirewall firewall delete rule name="{name}"')) and ok
+        return ok
     return False
 
 
@@ -447,11 +503,11 @@ def unblock_dst(dst_ip: str, port: Optional[int] = None) -> bool:
                 _err.set(res.stderr or res.stdout or 'netsh show rule failed')
                 return False
             ok = True
-            for line in res.stdout.splitlines():
-                if 'arpcut' in line.lower() and dst_ip.replace('.', '_') in line and 'Rule Name:' in line:
-                    rule_name = line.split('Rule Name:')[1].strip()
-                    ok = _netsh_delete_ok(
-                        _exec(f'netsh advfirewall firewall delete rule name="{rule_name}"')) and ok
+            target = dst_ip.replace('.', '_')
+            for name in _arpcut_rule_names_in(res.stdout):
+                if target in name:
+                    ok = _netsh_delete_ok(_exec(
+                        f'netsh advfirewall firewall delete rule name="{name}"')) and ok
             return ok
         return False
     return _remove_rules_where(lambda line: _pf_line_targets_ip(line, dst_ip))
@@ -492,8 +548,10 @@ def pf_self_check() -> bool:
     """Verify that the firewall backend is operational."""
     if sys.platform != 'darwin':
         if sys.platform.startswith('win'):
+            # netsh must be operational AND a firewall profile enabled. The state
+            # word ('ON'/'EIN'/…) is localized, so check enablement via registry.
             res = _exec('netsh advfirewall show allprofiles state')
-            return res.returncode == 0 and 'ON' in res.stdout
+            return res.returncode == 0 and _win_firewall_enabled()
         return True
     if not ensure_pf_enabled():
         return False
@@ -798,11 +856,10 @@ def clear_all_port_blocks() -> bool:
             _err.set(res.stderr or res.stdout or 'netsh show rule failed')
             return False
         ok = True
-        for line in res.stdout.splitlines():
-            if 'arpcut_port' in line.lower() and 'Rule Name:' in line:
-                rule_name = line.split('Rule Name:')[1].strip()
-                ok = _netsh_delete_ok(
-                    _exec(f'netsh advfirewall firewall delete rule name="{rule_name}"')) and ok
+        for name in _arpcut_rule_names_in(res.stdout):
+            if name.startswith('arpcut_port'):
+                ok = _netsh_delete_ok(_exec(
+                    f'netsh advfirewall firewall delete rule name="{name}"')) and ok
         return ok
     return False
 

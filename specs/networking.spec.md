@@ -134,6 +134,19 @@ resolved by the scanner; do not block against the dummy.
 - [x] Implement the WinDivert kernel forwarder on Windows — Phase 2
       (`windivert_forwarder.py`; `IPEnableRouter` + `NETWORK_FORWARD` drop; wired
       into `enable_ip_forwarding`/`one_way_kill`; unit-tested filter builder).
+- [x] Full/regular kill on Windows drops the victim in-kernel (WinDivert drop-all,
+      both directions) instead of relying on ARP-poison alone; **removed** the
+      `enable_ip_forwarding()` from `Killer.__init__` (it enabled `IPEnableRouter`
+      globally and made full kills *leak* — the kernel routed the poisoned traffic).
+      Forwarding is now enabled only by `one_way_kill`/selective blocks that need it.
+- [x] Selective per-victim drops (`selective_block`/`selective_unblock`/`lag`) via
+      scoped WinDivert filters; port blocking with a target IP routes through them
+      (`helper.Engine.block_port`). `block_all_for` (Windows) now blocks both directions.
+- [ ] Wire the lag switch (`block_ip` path) and host presets (no victim IP in the
+      API yet) to the WinDivert selective path; needs victim IP threaded through
+      the protocol + e2e validation.
+- [x] Locale-robust netsh: firewall state via registry (not the localized 'ON'),
+      rule readback via the `arpcut_*` token (not the localized 'Rule Name:').
 - [ ] Validate the Linux nft forward-hook chain end-to-end on a real Linux host.
 - [ ] Lock `devices` rebuild; scope `conf.iface`; fix `get_gateway_mac` heuristic.
 - [ ] Unit tests with mocked scapy (scan parsing, kill packet construction).
