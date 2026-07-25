@@ -220,6 +220,7 @@ class MainWindow(GlassWindow):
                 row.clicked.connect(self._select)
                 row.activated.connect(lambda m: self._open_device())
                 row.cut_toggled.connect(self.ctrl.toggle_cut)
+                row.spoof_toggled.connect(self._on_spoof_toggled)
                 self._rows[device['mac']] = row
             else:
                 row.device = device
@@ -227,6 +228,24 @@ class MainWindow(GlassWindow):
         self._refresh_states()
         self._apply_filter(self._search.text())
         self._update_count()
+
+    def _on_spoof_toggled(self, mac: str) -> None:
+        """Toggle routing-through-us. Turning it OFF while blocks depend on it
+        warns first and clears them on confirm (keeps them on decline)."""
+        if self.ctrl.is_spoofed(mac):
+            blocks = self.ctrl.device_blocks(mac)
+            if blocks:
+                from PySide6.QtWidgets import QMessageBox
+                resp = QMessageBox.warning(
+                    self, 'Stop routing this device?',
+                    'This device has active effects that need it routed through '
+                    'your PC:\n\n  • ' + '\n  • '.join(blocks) + '\n\n'
+                    'Stopping the spoof will clear them. Continue?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if resp != QMessageBox.Yes:
+                    self._refresh_states()          # re-sync the toggle we bounced
+                    return
+        self.ctrl.toggle_spoof(mac)
 
     def _refresh_states(self) -> None:
         for mac, row in self._rows.items():

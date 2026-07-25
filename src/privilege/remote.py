@@ -73,6 +73,12 @@ class RemoteEngine:
     def one_way_kill(self, mac: str) -> bool:
         return self._call('one_way_kill', mac=mac)
 
+    def spoof(self, mac: str) -> bool:
+        return self._call('spoof', mac=mac)
+
+    def lag(self, mac: str, on: bool) -> bool:
+        return self._call('lag', mac=mac, on=on)
+
     # -- firewall primitives -------------------------------------------------
     def block_all_for(self, ip: str) -> bool:
         return self._call('block_all_for', ip=ip)

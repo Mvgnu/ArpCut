@@ -58,6 +58,7 @@ class DeviceRow(QFrame):
     clicked = Signal(str)
     activated = Signal(str)
     cut_toggled = Signal(str)
+    spoof_toggled = Signal(str)
 
     def __init__(self, device: dict, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -91,7 +92,19 @@ class DeviceRow(QFrame):
         if self.admin:
             lay.addWidget(label('YOU' if device['type'] == 'Me' else 'GATEWAY', 'tag'))
             self._cut = None
+            self._spoof = None
         else:
+            # Spoof = route this device through us (no drop). It's the prerequisite
+            # for blockers/lag/monitor; those auto-enable it, and it can be toggled
+            # here directly so you can see when traffic is being routed.
+            self._spoof = IconButton('wifi', text='Spoof',
+                                     tooltip='Route this device through your PC '
+                                             '(required for blockers, lag, monitor)',
+                                     checkable=True, variant='ghost')
+            self._spoof.setMinimumWidth(90)
+            self._spoof.clicked.connect(lambda: self.spoof_toggled.emit(self.mac))
+            lay.addWidget(self._spoof)
+
             self._cut = IconButton('cut', text='Cut',
                                    tooltip='Cut this device off the internet '
                                            '(ARP redirect + firewall drop)',
@@ -120,11 +133,13 @@ class DeviceRow(QFrame):
                 w.deleteLater()
 
         cut = state.get('cut')
+        spoof = state.get('spoof')
         monitor = state.get('monitor')
         one_way = state.get('one_way')
         dns = state.get('dns')
         badge_tone = ('accent' if monitor else 'danger' if cut
-                      else 'purple' if dns else 'warn' if one_way else self._type_tone())
+                      else 'purple' if dns else 'warn' if one_way
+                      else 'good' if spoof else self._type_tone())
         self._badge.set_look(icons.device_glyph(self.device['type']), badge_tone)
 
         if monitor:
@@ -133,10 +148,18 @@ class DeviceRow(QFrame):
             self._chips.addWidget(Chip('One-way', 'warn'))
         elif cut:
             self._chips.addWidget(Chip('Cut', 'danger'))
+        elif spoof:
+            self._chips.addWidget(Chip('Routed', 'good'))
         if dns:
             self._chips.addWidget(Chip('PSN', 'purple'))
         if state.get('lag'):
             self._chips.addWidget(Chip('Lag', 'warn'))
+
+        if self._spoof is not None:
+            # Cut implies routing too, but the drop is total; show spoof active
+            # whenever the device is routed through us.
+            self._spoof.set_active(bool(spoof), 'good')
+            self._spoof.setText('  Routed' if spoof else '  Spoof')
 
         if self._cut is not None:
             self._cut.set_active(bool(cut), 'danger')

@@ -111,6 +111,8 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
     Command('kill_all', desc='Block all non-admin devices.'),
     Command('unkill_all', desc='Restore all devices.'),
     Command('one_way_kill', (Arg('mac', is_mac),), 'Block a device outbound (kernel).'),
+    Command('spoof', (Arg('mac', is_mac),), 'Route a device through us (no drop) — base for monitor/lag/blocks.'),
+    Command('lag', (Arg('mac', is_mac), Arg('on', is_bool)), 'Toggle a full kernel drop of a device (lag switch).'),
     Command('block_ip', (Arg('ip', is_ipv4), Arg('direction', is_direction, required=False)),
             'Firewall-block an IP.'),
     Command('unblock_ip', (Arg('ip', is_ipv4),), 'Remove an IP block.'),

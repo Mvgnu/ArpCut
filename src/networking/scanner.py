@@ -18,6 +18,33 @@ from tools.utils import (terminal, threaded, get_vendor, good_mac,
 from constants import GLOBAL_MAC
 
 
+def _is_unicast_pair(ip: str, mac: str) -> bool:
+    """True if (ip, mac) is a real unicast host — filters ARP-cache noise.
+
+    Locale-independent replacement for the old "dynamic/static" text filter:
+    drops multicast/broadcast rows structurally (IP 224.0.0.0+ or .255, and
+    multicast MACs whose first octet has the low bit set: 01:00:5e, 33:33, ff:…).
+    """
+    parts = ip.split('.')
+    if len(parts) != 4:
+        return False
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if not all(0 <= o <= 255 for o in octets):
+        return False
+    if octets[0] >= 224 or octets[3] == 255:      # multicast/reserved or broadcast
+        return False
+    first = mac.replace('-', ':').split(':')[0]
+    try:
+        if int(first, 16) & 1:                    # multicast/broadcast MAC
+            return False
+    except ValueError:
+        return False
+    return True
+
+
 class DeviceInfo(TypedDict):
     """Canonical device record used throughout ArpCut."""
     ip: str
@@ -176,10 +203,10 @@ class Scanner():
                 # Fallback: get all ARP entries
                 scan_result = terminal('arp -a')
             
-            if scan_result:
-                # Filter for dynamic entries
-                lines = [l for l in scan_result.split('\n') if 'dynamic' in l.lower() or 'static' in l.lower()]
-                scan_result = '\n'.join(lines)
+            # NOTE: don't pre-filter on the words "dynamic"/"static" — those are
+            # localized ("dynamisch"/"statisch" on German Windows), which made the
+            # ping (deep) scan return zero devices. Non-unicast rows are dropped
+            # structurally in the parse loop below instead.
         else:
             scan_result = terminal('arp -an')
         
@@ -200,17 +227,10 @@ class Scanner():
                     ip = parts[0]
                     # MAC might be in format 00-11-22 or 00:11:22
                     mac_candidate = parts[1].replace('-', ':')
-                    # Validate IP format
-                    if '.' in ip and ip.count('.') == 3:
-                        try:
-                            # Quick IP validation
-                            nums = ip.split('.')
-                            if all(0 <= int(n) <= 255 for n in nums):
-                                mac = good_mac(mac_candidate)
-                                if mac and mac != GLOBAL_MAC:
-                                    clean_result.append((ip, mac))
-                        except (ValueError, IndexError):
-                            continue
+                    if _is_unicast_pair(ip, mac_candidate):
+                        mac = good_mac(mac_candidate)
+                        if mac and mac != GLOBAL_MAC:
+                            clean_result.append((ip, mac))
         else:
             # macOS/Linux: parse lines like "? (192.168.1.1) at aa:bb:cc:dd:ee:ff on en0 ..."
             lines = [l for l in scan_result.split('\n') if l.strip()]

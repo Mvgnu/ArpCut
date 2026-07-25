@@ -14,6 +14,7 @@ All driven through the Controller — never the firewall/engine directly.
 """
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget,
 )
@@ -30,7 +31,7 @@ _BLURB = {
 
 class BlockerDialog(Dialog):
     def __init__(self, controller, parent=None) -> None:
-        super().__init__('Blocker', parent, width=540)
+        super().__init__('Blocker', parent, width=540, scroll=True)
         self.ctrl = controller
         self._target = None
         self._preset_toggles: dict[str, ToggleSwitch] = {}
@@ -113,9 +114,20 @@ class BlockerDialog(Dialog):
         self._active_box.setSpacing(6)
         self.content.addLayout(self._active_box)
 
-        controller.host_blocks_changed.connect(lambda _: self._refresh())
-        controller.states_changed.connect(self._refresh)
+        # Each _refresh enumerates all firewall rules (netsh show rule name=all);
+        # debounce so a burst of state changes coalesces into one refresh, and skip
+        # entirely while hidden — this was a real source of growing lag.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(250)
+        self._refresh_timer.timeout.connect(self._refresh)
+        controller.host_blocks_changed.connect(lambda _: self._schedule_refresh())
+        controller.states_changed.connect(self._schedule_refresh)
         self._refresh()
+
+    def _schedule_refresh(self) -> None:
+        if self.isVisible():
+            self._refresh_timer.start()
 
     # -- presets -------------------------------------------------------------
 

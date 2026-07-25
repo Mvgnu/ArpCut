@@ -114,13 +114,15 @@ class Controller(QObject):
         self._iface = 'NULL'
         self._admin = is_admin()
         self._privileged = self._admin or self._remote
-        self._spoofed: set[str] = set()      # every ARP-spoofed mac
+        self._spoofed: set[str] = set()      # every ARP-spoofed (routed) mac
+        self._explicit_spoof: set[str] = set()   # spoof the user turned on directly
         self._cut: dict[str, str] = {}        # mac -> ip currently firewall-cut
         self.one_way_kills: set[str] = set()
         self._monitoring: set[str] = set()
         self._monitor_spoofed: set[str] = set()
         self._dns_blocks: dict[str, str] = {}    # mac -> ip under DNS-name block (PSN)
         self._dns_spoofed: set[str] = set()
+        self._port_blocks: dict[str, set] = {}   # mac -> {(port, proto)} blocked for it
 
         # lag switch
         self._lag_mac: Optional[str] = None
@@ -287,11 +289,97 @@ class Controller(QObject):
         mac = device['mac']
         return {
             'cut': mac in self._cut,
+            'spoof': mac in self._spoofed,
             'one_way': mac in self.one_way_kills,
             'monitor': mac in self._monitoring,
             'dns': mac in self._dns_blocks,
             'lag': self._lag_timer.isActive() and self._lag_mac == mac,
         }
+
+    # -- spoof (route a device through us — the base for blocks) --------------
+
+    def is_spoofed(self, mac: str) -> bool:
+        return mac in self._spoofed
+
+    def _ensure_spoofed(self, mac: str) -> None:
+        """Route a device through us (idempotent). Base for monitor/lag/blocks."""
+        if mac not in self._spoofed:
+            self.ops.spoof(mac)
+            self._spoofed.add(mac)
+
+    def device_blocks(self, mac: str) -> list[str]:
+        """Human labels for everything that would stop if this device is un-spoofed."""
+        blocks: list[str] = []
+        if mac in self._cut:
+            blocks.append('cut')
+        if mac in self.one_way_kills:
+            blocks.append('one-way kill')
+        if mac in self._dns_blocks:
+            blocks.append('DNS block')
+        if mac in self._monitoring:
+            blocks.append('traffic monitor')
+        if self.lag_active_for(mac):
+            blocks.append('lag switch')
+        pb = self._port_blocks.get(mac)
+        if pb:
+            blocks.append(f'{len(pb)} port block' + ('s' if len(pb) != 1 else ''))
+        return blocks
+
+    def _clear_device_blocks(self, mac: str) -> None:
+        """Remove every block tied to a device (used when un-spoofing it)."""
+        device = self.device_by_mac(mac)
+        ip = device['ip'] if device else self._cut.get(mac)
+        if self.lag_active_for(mac):
+            self.stop_lag()
+        if mac in self._monitoring:
+            self._safe(lambda: self.ops.stop_sniff())
+            self._monitoring.discard(mac)
+            self._monitor_spoofed.discard(mac)
+        if mac in self._dns_blocks:
+            di = self._dns_blocks.pop(mac, ip)
+            if di:
+                self._safe(lambda: self.ops.dns_unblock(di))
+            self._dns_spoofed.discard(mac)
+        for port, proto in list(self._port_blocks.get(mac, set())):
+            self._safe(lambda p=port, pr=proto: self.ops.unblock_port(p, pr))
+        self._port_blocks.pop(mac, None)
+        if mac in self._cut:
+            if ip:
+                self._safe(lambda: self.ops.unblock_all_for(ip))
+            self._cut.pop(mac, None)
+        self.one_way_kills.discard(mac)
+
+    @guarded
+    def toggle_spoof(self, mac: str, clear_blocks: bool = True) -> None:
+        """Turn routing-through-us on/off for a device.
+
+        Turning it OFF clears every block on the device (the UI warns first);
+        pass ``clear_blocks=False`` only if the caller already handled them.
+        """
+        device = self.device_by_mac(mac)
+        if not device or device['admin']:
+            return
+        if mac in self._spoofed:
+            if clear_blocks:
+                self._clear_device_blocks(mac)
+            self._explicit_spoof.discard(mac)
+            self._maybe_unspoof(mac)
+            self.status.emit(f'Stopped routing {device["ip"]} through this PC', 'good')
+        else:
+            self.ops.spoof(mac)
+            self._spoofed.add(mac)
+            self._explicit_spoof.add(mac)
+            self.status.emit(f'Routing {device["ip"]} through this PC — blocks can now apply', 'accent')
+        self.states_changed.emit()
+
+    def _maybe_unspoof(self, mac: str) -> None:
+        """Drop the ARP spoof only if nothing still needs the device routed."""
+        if (mac in self._cut or mac in self.one_way_kills or mac in self._monitoring
+                or mac in self._dns_blocks or self.lag_active_for(mac)
+                or mac in self._explicit_spoof or self._port_blocks.get(mac)):
+            return
+        self._safe(lambda: self.ops.unkill(mac))
+        self._spoofed.discard(mac)
 
     def _do_cut(self, mac: str, ip: str) -> None:
         if mac not in self._spoofed:
@@ -336,14 +424,22 @@ class Controller(QObject):
     @guarded
     def unkill_all(self) -> None:
         self.stop_lag()
-        self.ops.unkill_all()
-        for ip in list(self._cut.values()):
-            self.ops.unblock_all_for(ip)
+        # cleanup() is the comprehensive teardown: unkill all + stop sniffer/DNS +
+        # clear every firewall rule (port/ip/host) and WinDivert drop. So "Restore
+        # all" clears BLOCKS too, not just cuts.
+        self._safe(self.ops.cleanup)
         self._cut.clear()
         self.one_way_kills.clear()
         self._spoofed.clear()
+        self._explicit_spoof.clear()
+        self._monitoring.clear()
+        self._monitor_spoofed.clear()
+        self._dns_blocks.clear()
+        self._dns_spoofed.clear()
+        self._port_blocks.clear()
         self._persist_killed()
-        self.status.emit('Restored all devices.', 'good')
+        self._emit_hosts()
+        self.status.emit('Restored all devices and cleared every block.', 'good')
         self.states_changed.emit()
 
     @guarded
@@ -383,26 +479,22 @@ class Controller(QObject):
         if not device:
             self.stop_lag()
             return
-        mac, ip = device['mac'], device['ip']
-        if mac not in self._spoofed:
-            self.ops.kill(mac)
-            self._spoofed.add(mac)
-        self.ops.block_ip(ip, self._lag_dir)
-        QTimer.singleShot(self._lag_block_ms, lambda ip=ip: self._safe(lambda: self.ops.unblock_ip(ip)))
+        mac = device['mac']
+        self._ensure_spoofed(mac)            # route through us (no permanent drop)
+        # Drop everything for one window, then release — a real kernel lag/loss.
+        self.ops.lag(mac, True)
+        QTimer.singleShot(self._lag_block_ms,
+                          lambda m=mac: self._safe(lambda: self.ops.lag(m, False)))
 
     @guarded
     def stop_lag(self) -> None:
         if not self._lag_timer.isActive() and self._lag_mac is None:
             return
         self._lag_timer.stop()
-        device = self.device_by_mac(self._lag_mac) if self._lag_mac else None
-        if device:
-            mac, ip = device['mac'], device['ip']
-            self.ops.unblock_ip(ip)
-            if (mac in self._spoofed and mac not in self.one_way_kills
-                    and mac not in self._cut and mac not in self._monitoring):
-                self.ops.unkill(mac)
-                self._spoofed.discard(mac)
+        mac = self._lag_mac
+        if mac:
+            self._safe(lambda: self.ops.lag(mac, False))
+            self._maybe_unspoof(mac)
         self._lag_mac = None
         self.status.emit('Lag switch off.', 'good')
         self.states_changed.emit()
@@ -447,18 +539,35 @@ class Controller(QObject):
 
     def block_port(self, port: int, proto: str = 'tcp', direction: str = 'both',
                    target_ip: Optional[str] = None) -> bool:
+        # A device-scoped port block only bites if that device is routed through
+        # us — so auto-spoof it (the block ceases if you later stop spoofing).
+        mac = None
+        if target_ip:
+            dev = next((d for d in self._devices if d['ip'] == target_ip and not d['admin']), None)
+            if dev:
+                mac = dev['mac']
+                self._ensure_spoofed(mac)
         try:
             ok = bool(self.ops.block_port(port, proto, direction, target_ip))
         except Exception as exc:  # noqa: BLE001
             ok = False
             log.warning('block_port: %s', exc)
+        if ok and mac:
+            self._port_blocks.setdefault(mac, set()).add((port, proto))
         self.status.emit(f'Blocked port {port}/{proto}' if ok
                          else 'Port block failed (need root / helper?)', 'danger' if ok else 'warn')
+        self.states_changed.emit()
         return ok
 
     def unblock_port(self, port: int, proto: str = 'tcp') -> None:
         self._safe(lambda: self.ops.unblock_port(port, proto))
+        for mac in list(self._port_blocks):
+            self._port_blocks[mac].discard((port, proto))
+            if not self._port_blocks[mac]:
+                self._port_blocks.pop(mac, None)
+                self._maybe_unspoof(mac)
         self.status.emit(f'Unblocked port {port}/{proto}', 'good')
+        self.states_changed.emit()
 
     def list_blocked_ports(self) -> list:
         try:
@@ -514,10 +623,9 @@ class Controller(QObject):
         device = self.device_by_mac(mac)
         if not device or device['admin']:
             return False
-        self.ops.set_forwarding(True)
-        if mac not in self._spoofed:
-            self.ops.kill(mac)
-            self._spoofed.add(mac)
+        was_spoofed = mac in self._spoofed
+        self._ensure_spoofed(mac)          # route through us (no drop) so we can see it
+        if not was_spoofed:
             self._monitor_spoofed.add(mac)
         self._monitoring.add(mac)
         self.ops.start_sniff(device['ip'])
@@ -532,12 +640,8 @@ class Controller(QObject):
     def stop_monitor(self, mac: str) -> None:
         self.ops.stop_sniff()
         self._monitoring.discard(mac)
-        if mac in self._monitor_spoofed:
-            self._monitor_spoofed.discard(mac)
-            if (mac in self._spoofed and mac not in self.one_way_kills
-                    and mac not in self._cut):
-                self.ops.unkill(mac)
-                self._spoofed.discard(mac)
+        self._monitor_spoofed.discard(mac)
+        self._maybe_unspoof(mac)
         self.states_changed.emit()
 
     def flows(self) -> list:
@@ -560,10 +664,9 @@ class Controller(QObject):
         if not device or device['admin']:
             return
         ip = device['ip']
-        self.ops.set_forwarding(True)
-        if mac not in self._spoofed:              # DNS must flow through us
-            self.ops.kill(mac)
-            self._spoofed.add(mac)
+        was_spoofed = mac in self._spoofed
+        self._ensure_spoofed(mac)                 # DNS must flow through us
+        if not was_spoofed:
             self._dns_spoofed.add(mac)
         self.ops.dns_block(ip, list(domains))
         self._dns_blocks[mac] = ip
@@ -576,12 +679,8 @@ class Controller(QObject):
         ip = self._dns_blocks.pop(mac, device['ip'] if device else None)
         if ip:
             self.ops.dns_unblock(ip)
-        if mac in self._dns_spoofed:
-            self._dns_spoofed.discard(mac)
-            if (mac in self._spoofed and mac not in self._cut
-                    and mac not in self.one_way_kills and mac not in self._monitoring):
-                self.ops.unkill(mac)
-                self._spoofed.discard(mac)
+        self._dns_spoofed.discard(mac)
+        self._maybe_unspoof(mac)
         self.status.emit('DNS block off.', 'good')
         self.states_changed.emit()
 

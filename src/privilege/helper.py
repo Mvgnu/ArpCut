@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 _MUTATING = {
     'set_iface', 'scan', 'kill', 'unkill', 'kill_all', 'unkill_all', 'one_way_kill',
+    'spoof', 'lag',
     'block_all_for', 'unblock_all_for', 'block_ip', 'unblock_ip', 'block_port',
     'unblock_port', 'block_host', 'unblock_host', 'refresh_hosts', 'cleanup',
     'dns_block', 'dns_unblock',
@@ -126,6 +127,16 @@ class Engine:
 
     def one_way_kill(self, mac: str) -> bool:
         self.killer.one_way_kill(self._device(mac))
+        return True
+
+    def spoof(self, mac: str) -> bool:
+        """Route the device through us (no drop) — base for monitor/lag/blocks."""
+        self.killer.spoof(self._device(mac))
+        return True
+
+    def lag(self, mac: str, on: bool) -> bool:
+        """Toggle a full kernel drop of a (spoofed) device for the lag switch."""
+        self.killer.lag(self._device(mac), bool(on))
         return True
 
     # -- firewall primitives -------------------------------------------------
@@ -314,6 +325,8 @@ class HelperServer:
             'kill_all': lambda: e.kill_all(),
             'unkill_all': lambda: e.unkill_all(),
             'one_way_kill': lambda: e.one_way_kill(a['mac']),
+            'spoof': lambda: e.spoof(a['mac']),
+            'lag': lambda: e.lag(a['mac'], a['on']),
             'block_all_for': lambda: e.block_all_for(a['ip']),
             'unblock_all_for': lambda: e.unblock_all_for(a['ip']),
             'block_ip': lambda: e.block_ip(a['ip'], a.get('direction', 'both')),

