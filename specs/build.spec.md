@@ -97,8 +97,10 @@ per-OS build runs (need a Windows box / Developer ID).
 
 ## Remaining (deploy-gated)
 
-- [ ] CI (`build-release.yml`) calls `build.py`; swap PyQt5→PySide6 hidden-imports;
-      add a `pytest` gate.
+- [x] CI (`build-release.yml`) calls `build.py` on all three OSes (kills the stale
+      PyQt5/qdarkstyle hidden-imports); a `pytest` gate blocks releases; the Windows
+      job builds **both** the launcher exe and the Inno installer (conditional Npcap
+      bundling) and uploads both.
 - [ ] macOS: `.icns`, Developer-ID sign + notarize the `.app` and `.dmg`; bundle
       `arpcut-helper` + register via `SMAppService` (turns Set Up Access into one prompt).
 - [ ] Windows: run the Inno build on a Windows box; drop `vendor/npcap.exe`; code-sign.

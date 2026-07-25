@@ -142,8 +142,9 @@ repaint. See `gui.spec.md`.
 **Phase 5 — Installers.** Signed+notarized `.dmg` (with helper install), Windows
 NSIS/Inno installer bundling Npcap, Linux AppImage/`.deb`. CI drives `build.py`;
 release artifacts are installers, not raw binaries. The CI workflow
-(`build-release.yml`) still lists PyQt5/qdarkstyle hidden-imports — swap to PySide6
-here.
+(`build-release.yml`) now calls `build.py` on all OSes (dropping the stale
+PyQt5/qdarkstyle hidden-imports), gates on `pytest`, and the Windows job emits both
+the launcher exe and the Inno installer.
 
 ## Working conventions (kept from prior guidance, de-ceremonied)
 

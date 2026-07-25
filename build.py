@@ -54,8 +54,14 @@ def build() -> None:
     """Build ArpCut binary for the current platform."""
     system: str = platform.system()
 
-    # Base command
-    cmd: list[str] = ['pyinstaller', '--name', f'ArpCut-{VERSION}']
+    # Base command — invoke PyInstaller via the current interpreter so it works
+    # whether or not the console script is on PATH (venv / CI parity).
+    cmd: list[str] = [sys.executable, '-m', 'PyInstaller', '--name', f'ArpCut-{VERSION}']
+
+    # Per-platform hidden imports / data collection (copied so we can extend
+    # them for Windows without mutating the module-level lists).
+    hidden_imports = list(HIDDEN_IMPORTS)
+    collect_all = list(COLLECT_ALL)
 
     # Platform-specific options
     if system == 'Windows':
@@ -63,6 +69,10 @@ def build() -> None:
         cmd.extend(['--add-data', 'exe/manuf;manuf'])
         cmd.extend(['--icon', 'exe/icon.ico'])
         cmd.extend(['--uac-admin'])  # Force admin elevation prompt
+        # Bundle WinDivert (kernel forwarder). --collect-all pulls in the
+        # WinDivert64.dll/.sys driver files that pydivert ships.
+        hidden_imports.append('pydivert')
+        collect_all.append('pydivert')
     elif system == 'Darwin':  # macOS
         cmd.extend(['--onedir', '--windowed'])
         cmd.extend(['--add-data', 'exe/manuf:manuf'])
@@ -72,11 +82,11 @@ def build() -> None:
         cmd.extend(['--add-data', 'exe/manuf:manuf'])
 
     # Add hidden imports
-    for imp in HIDDEN_IMPORTS:
+    for imp in hidden_imports:
         cmd.extend(['--hidden-import', imp])
 
     # Collect all data for these packages
-    for pkg in COLLECT_ALL:
+    for pkg in collect_all:
         cmd.extend(['--collect-all', pkg])
 
     # Entry point

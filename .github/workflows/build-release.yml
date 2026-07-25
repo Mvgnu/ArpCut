@@ -7,146 +7,160 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # Gate every release build on the test suite. The engine + WinDivert filter
+  # tests run on Linux; the AF_UNIX helper-IPC suite runs here (it's skipped on
+  # Windows). A red suite blocks the release.
+  test:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
+      - name: Install system dependencies (Qt runtime for offscreen tests)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libxkbcommon-x11-0 libegl1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: src
+        run: pytest tests/ -q
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-      
-      - name: Build Windows EXE
+
+      - name: Read version
+        id: ver
+        shell: pwsh
         run: |
-          pyinstaller --onefile --windowed --name ArpCut `
-            --add-data "exe/manuf;manuf" `
-            --icon exe/icon.ico `
-            --uac-admin `
-            --hidden-import PyQt5 `
-            --hidden-import PyQt5.QtWidgets `
-            --hidden-import PyQt5.QtCore `
-            --hidden-import PyQt5.QtGui `
-            --hidden-import PyQt5.sip `
-            --hidden-import qdarkstyle `
-            --hidden-import scapy `
-            --hidden-import scapy.all `
-            --hidden-import scapy.layers.all `
-            --hidden-import manuf `
-            --hidden-import pyperclip `
-            --hidden-import requests `
-            --collect-all manuf `
-            --collect-all scapy `
-            --collect-all qdarkstyle `
-            src/elmocut.py
-      
-      - name: Upload Windows artifact
+          $v = (python build.py --version).Split(' ')[1]
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Direct launcher: single-file, UAC-admin exe. build.py carries the correct
+      # PySide6 hidden-imports and bundles the WinDivert driver via pydivert.
+      - name: Build Windows EXE (direct launcher)
+        run: python build.py
+
+      # Best-effort: bundle the Npcap driver so the installer can offer it. If the
+      # download fails, the installer still builds (the app points users at the
+      # Npcap page on first run) — see the ISPP guard in arpcut.iss.
+      - name: Download Npcap for bundling
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force packaging/windows/vendor | Out-Null
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.79.exe" `
+            -OutFile packaging/windows/vendor/npcap.exe
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ steps.ver.outputs.version }} `
+            packaging\windows\arpcut.iss
+
+      # Ship both options: the standalone launcher and the friendly installer.
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ArpCut-Windows
-          path: dist/ArpCut.exe
+          path: |
+            dist/ArpCut-${{ steps.ver.outputs.version }}.exe
+            dist/ArpCut-${{ steps.ver.outputs.version }}-Setup.exe
 
   build-macos:
+    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pillow
-      
-      - name: Build macOS App
-        run: |
-          pyinstaller --onedir --windowed --name ArpCut \
-            --add-data "exe/manuf:manuf" \
-            --icon exe/icon.ico \
-            --hidden-import PyQt5 \
-            --hidden-import PyQt5.QtWidgets \
-            --hidden-import PyQt5.QtCore \
-            --hidden-import PyQt5.QtGui \
-            --hidden-import PyQt5.sip \
-            --hidden-import qdarkstyle \
-            --hidden-import scapy \
-            --hidden-import scapy.all \
-            --hidden-import scapy.layers.all \
-            --hidden-import manuf \
-            --hidden-import pyperclip \
-            --hidden-import requests \
-            --collect-all manuf \
-            --collect-all scapy \
-            --collect-all qdarkstyle \
-            src/elmocut.py
-      
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(python build.py --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS app
+        run: python build.py
+
       - name: Create ZIP
         run: |
-          cd dist && zip -r ../ArpCut-macOS.zip ArpCut.app
-      
+          cd dist && zip -r "ArpCut-macOS.zip" "ArpCut-${{ steps.ver.outputs.version }}.app"
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: ArpCut-macOS
-          path: ArpCut-macOS.zip
+          path: dist/ArpCut-macOS.zip
 
   build-linux:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-xinerama0 libxkbcommon-x11-0
-      
+          sudo apt-get install -y libxcb-xinerama0 libxkbcommon-x11-0 libegl1
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-      
+
+      - name: Read version
+        id: ver
+        run: echo "version=$(python build.py --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Build Linux binary
-        run: |
-          pyinstaller --onefile --name ArpCut \
-            --add-data "exe/manuf:manuf" \
-            --hidden-import PyQt5 \
-            --hidden-import PyQt5.QtWidgets \
-            --hidden-import PyQt5.QtCore \
-            --hidden-import PyQt5.QtGui \
-            --hidden-import PyQt5.sip \
-            --hidden-import qdarkstyle \
-            --hidden-import scapy \
-            --hidden-import scapy.all \
-            --hidden-import scapy.layers.all \
-            --hidden-import manuf \
-            --hidden-import pyperclip \
-            --hidden-import requests \
-            --collect-all manuf \
-            --collect-all scapy \
-            --collect-all qdarkstyle \
-            src/elmocut.py
-      
+        run: python build.py
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: ArpCut-Linux
-          path: dist/ArpCut
+          path: dist/ArpCut-${{ steps.ver.outputs.version }}
 
   release:
     needs: [build-windows, build-macos, build-linux]
@@ -159,20 +173,16 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      
+
       - name: List artifacts
         run: find artifacts -type f
-      
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/ArpCut-Windows/ArpCut.exe
-            artifacts/ArpCut-macOS/ArpCut-macOS.zip
-            artifacts/ArpCut-Linux/ArpCut
+          files: artifacts/**/*
           draft: false
           prerelease: false
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

@@ -11,6 +11,16 @@ import tempfile
 import threading
 import time
 
+import pytest
+
+# The helper daemon's IPC is a POSIX AF_UNIX socket (macOS/Linux privilege
+# separation). Windows uses UAC elevation instead and has no AF_UNIX, so the
+# whole loopback-IPC suite is skipped there rather than failing collection.
+pytestmark = pytest.mark.skipif(
+    not hasattr(socket, 'AF_UNIX'),
+    reason='helper IPC uses AF_UNIX (POSIX-only); Windows elevates via UAC',
+)
+
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))

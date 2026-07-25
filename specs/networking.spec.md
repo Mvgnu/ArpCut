@@ -6,6 +6,7 @@ paths:
   scanner: src/networking/scanner.py
   killer: src/networking/killer.py
   forwarder: src/networking/forwarder.py       # user-space fallback (traffic monitor)
+  windivert: src/networking/windivert_forwarder.py  # Windows kernel forwarder (WinDivert)
   sniffer: src/networking/sniffer.py
   ifaces: src/networking/ifaces.py
   nicknames: src/networking/nicknames.py
@@ -86,22 +87,28 @@ traffic through us → kernel forwards at native speed → firewall backend drop
 specific flows. No Python in the packet hot path.
 
 **Status**: mac/linux kernel forwarding is a real `enable_ip_forwarding()` sysctl
-in `killer.py` (called once in `Killer.__init__`). Windows has no sysctl
-equivalent for ARP-MITM'd traffic — that path will be **WinDivert**, written and
-validated on Windows (Phase 2). We do not ship an empty Windows forwarder shell in
-the meantime.
+in `killer.py` (called once in `Killer.__init__`). Windows now has a real path too:
+`enable_ip_forwarding()` sets the `IPEnableRouter` registry flag (the sysctl
+analogue) and `one_way_kill` starts a **WinDivert** `NETWORK_FORWARD` drop for the
+victim's outbound (`windivert_forwarder.py`). The filter matches only the flows to
+drop, so allowed traffic rides the kernel forward fast-path — no Python in the hot
+path. WinDivert (driver + DLL) ships with the `pydivert` dep (Windows-only) and is
+bundled by `build.py`/the installer. Filter construction is unit-tested against the
+real WinDivert engine (`WinDivert.check_filter`, no admin needed); live packet-drop
+validation needs an elevated run against a real victim.
 
 ## Confirmed bugs (fix in Phase 0/2)
 
 1. ~~`Scanner()` raised `NameError`~~ — **fixed**: `get_default_iface` /
    `get_iface_by_name` now imported at top of `scanner.py`. (Redundant local
    import at ~L302 can be removed.)
-2. **Windows selective-block is non-functional** (the "Windows desync/lag"): no
-   kernel forwarding on Windows and the `netsh` rule filters the *attacker's* host
-   not the victim's forwarded traffic. Progress: dead `_start_one_way_forwarder`
-   **removed**. **Remaining (Phase 2)**: implement the WinDivert kernel forwarder on
-   Windows (intercept + re-inject, dropping filtered flows), replacing the broken
-   netsh selective path.
+2. ~~**Windows selective-block is non-functional**~~ — **fixed (Phase 2)**: the
+   WinDivert kernel forwarder (`windivert_forwarder.py`) drops the victim's
+   forwarded flows in-kernel while `IPEnableRouter` lets the stack forward the
+   rest, replacing the broken `netsh` selective path (which filtered the
+   *attacker's* host, not the victim's forwarded traffic). The netsh block is kept
+   as a portable backstop. Live-traffic validation against a real victim is still
+   recommended before the next Windows release.
 3. **`conf.iface` global mutation** in `Killer.__init__` (`killer.py:43`) —
    process-global side effect; scope it or restore it.
 4. **`devices_appender` race**: rebuilds `self.devices` without holding `_lock`
@@ -124,7 +131,9 @@ resolved by the scanner; do not block against the dummy.
 - [x] Remove dead `_start_one_way_forwarder`; route selective block through the
       `Firewall` abstraction; add platform-aware `forwarding` package.
 - [x] Fix `flush_arp` unix no-op; remove redundant scanner import.
-- [ ] Implement the WinDivert kernel forwarder on Windows — Phase 2.
+- [x] Implement the WinDivert kernel forwarder on Windows — Phase 2
+      (`windivert_forwarder.py`; `IPEnableRouter` + `NETWORK_FORWARD` drop; wired
+      into `enable_ip_forwarding`/`one_way_kill`; unit-tested filter builder).
 - [ ] Validate the Linux nft forward-hook chain end-to-end on a real Linux host.
 - [ ] Lock `devices` rebuild; scope `conf.iface`; fix `get_gateway_mac` heuristic.
 - [ ] Unit tests with mocked scapy (scan parsing, kill packet construction).

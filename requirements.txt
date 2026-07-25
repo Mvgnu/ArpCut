@@ -3,5 +3,8 @@ PySide6>=6.7          # Qt6 GUI (LGPL) — frosted-glass UI, controller, dialogs
 scapy>=2.5.0          # raw ARP / packet engine (scanner, killer, sniffer)
 manuf>=1.1.1          # MAC-address vendor lookup
 
+# Windows-only: WinDivert kernel forwarder (bundles WinDivert64.dll/.sys).
+pydivert>=2.1; sys_platform == 'win32'
+
 # Build dependencies (optional, for building the app bundle)
 # pyinstaller>=5.0
