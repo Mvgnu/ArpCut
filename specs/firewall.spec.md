@@ -19,6 +19,7 @@ exports:
   - unblock_dst
   - is_blocked
   - clear_anchor
+  - clear_all_rules
   - clear_all_port_blocks
   - last_error
   - HostBlocklist
@@ -52,6 +53,26 @@ it's gone.
 
 `enable_ip_forwarding()` lives in `killer.py` (a real sysctl toggle for mac/linux,
 not a wrapper); Windows forwarding is deferred to WinDivert (Phase 2).
+
+## Audit hardening (2026-10-22)
+
+- `clear_all_rules()` clears only the ArpCut namespace. On Windows it enumerates
+  and deletes all `arpcut_*` rule names, including whole-device and destination
+  rules that the IP/port lists do not expose. Every deletion is attempted and a
+  failure is reported rather than masked by a later successful deletion.
+- PF cleanup checks the actual `pfctl` result. Linux setup, listing, deletion and
+  cleanup report missing executables/permissions; a genuinely absent table is an
+  idempotent cleanup success, distinguished by a successful table enumeration.
+- Linux validates interface names, IPs, protocols, directions and ports before
+  executing `nft`. Per-device port tags include the target IP so identical ports
+  on different devices cannot suppress each other's rule creation.
+- `HostBlocklist` tracks shared IP ownership across active names. Removing one
+  name preserves a rule still used by another. Failed removals stay tracked and
+  are retryable via `clear()`; refresh reports stale-deletion failures and keeps
+  owned rules during temporary DNS resolution failure.
+- Public DNS fallback checks the response source, transaction ID, question and
+  bounds before consuming answers. Malformed responses are resolution failures,
+  not uncaught parser exceptions.
 
 ## Bugs fixed (Phase 0/1)
 

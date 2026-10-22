@@ -1,156 +1,123 @@
 ---
 name: overview
-description: "ArpCut north-star architecture, locked decisions, domain map, and phased roadmap"
+description: "ArpCut architecture, locked decisions, domain map, and remaining delivery work"
 status: active
 supersedes: "the Rust-port framing and Løp/biolab governance in the prior specs"
 ---
 
 # ArpCut — Overview & Roadmap
 
-ArpCut is a cross-platform desktop tool for controlling local-network traffic:
-device discovery, ARP-based blocking (kill), selective blocking (one-way / lag /
-port / host), and live traffic monitoring. It targets Windows, macOS, and Linux.
+ArpCut is a Python/PySide6 desktop tool for local-network device discovery,
+ARP-based traffic control, selective blocking, and live traffic monitoring. It
+targets Windows, macOS, and Linux. This document records cross-domain direction;
+the domain specs describe the corresponding implementation contracts.
 
-This document is the **single source of truth for direction**. The per-domain
-specs (`platform`, `privilege`, `networking`, `firewall`, `gui`, `build`) describe
-their own slice; this file records the cross-cutting architecture and the order
-we build in.
+## Locked decisions
 
-## Locked decisions (confirmed 2026-07-24)
+- **Python stays.** No Rust rewrite is planned. Address measured bottlenecks in
+  the existing architecture before proposing a new native core.
+- **PySide6 is the GUI.** The earlier PyQt5/generated UI was replaced by
+  `gui/window.py`, `gui/controller.py`, dialogs, widgets, and SVG assets. Networking
+  and firewall modules remain independent of Qt.
+- **Privileged operations belong to one engine.** The controller uses
+  `privilege.helper.Engine` in an elevated process, or `RemoteEngine` over a
+  persistent Unix socket to a root helper. Both expose the same operations.
+- **Forwarding and filtering use platform facilities.** macOS/Linux use the
+  routing sysctl with PF/nftables. Windows uses routing configuration and
+  WinDivert's `NETWORK_FORWARD` drop filters. Npcap supplies Windows packet
+  capture/ARP access and is a separate dependency.
 
-1. **Language: Python stays; no Rust rewrite.** The desync/lag is not "Python is
-   slow" — it is that packet forwarding runs in Python user-space (or, on Windows,
-   nowhere). We fix it by moving forwarding into the **kernel on every platform**,
-   not by rewriting in Rust. A native core is revisited only if a specific
-   bottleneck survives kernel forwarding.
-2. **UI: full rewrite on PySide6** (Qt6, LGPL) with a custom frosted-glass theme.
-   **Done** — the elmoCut-derived PyQt5 interface, generated `src/ui/*.py`, base64
-   `assets.py`, `bridge.py`, `qtools.py`, and raster icons are deleted; a
-   device-centric window + controller + SVG iconography replace them. The
-   networking/firewall engine (which has **zero Qt imports**) is reused unchanged
-   behind the controller. See `gui.spec.md`.
-3. **Privilege: split architecture.** An unprivileged GUI talks to a privileged
-   engine. On macOS that engine is a **root helper daemon** (SMAppService /
-   SMJobBless), installed once with an admin prompt — the same model as Wireshark
-   and Little Snitch. This is what makes a double-clicked, signed app actually
-   work. See `privilege.spec.md`.
+## Current architecture (2026-10-22)
 
-## Why the app doesn't "work out of the box" today
+The GUI displays user intent and engine results. The controller serializes
+operations, runs scans and background tasks off the UI thread, and discards
+queued results after restore, interface changes, or shutdown. A failed operation
+must remain visible instead of being presented as a successful state change.
 
-The core capability (raw ARP frames, pf/netsh rules, IP-forwarding toggle)
-**inherently requires elevated privilege on every OS**. There is no sandbox-safe
-path — this can never ship on the Mac App Store.
+The engine owns scanner, ARP sessions, capture, DNS-name filters, host blocks,
+and firewall changes. Device-control operations reject the local host and
+router independently of the GUI. Restore first stops poison workers, then sends
+corrective ARP mappings and tears down rules. Failed state remains available for
+retry. Cleanup attempts independent stages even when one stage fails.
 
-- **macOS**: `/dev/bpf*` is `root:wheel 0600`. A double-clicked GUI runs as the
-  user and cannot open it, so scapy fails silently. Signing/notarization only
-  gets you past Gatekeeper to *launch*; the app then dies the moment it touches
-  BPF. The fix is privilege separation (helper daemon), not a packaging format.
-- **Windows**: already elevates via the UAC manifest, but needs the **Npcap**
-  driver, which is not bundled — the user must install it separately.
-- **Linux**: needs root or `CAP_NET_RAW`/`CAP_NET_ADMIN`; today it just fails.
+The root helper accepts one controlling subscribed GUI session, authenticates
+its peer UID, and restricts its socket to the installing user. Health/status
+probes do not acquire ownership. Losing the owning session triggers cleanup;
+malformed frames and expired requests cannot be reused as another request's
+response. Orderly application/helper shutdown also cleans up. Force-killing
+both the GUI and helper, killing an elevated local process, or losing power
+cannot guarantee an in-process restore; the next privileged startup and
+`--flush-firewall` clear ArpCut's firewall rules.
 
-## Target architecture
+### Privilege and installation
 
-```
-┌────────────────────────────┐        ┌─────────────────────────────────┐
-│  GUI  (unprivileged)       │        │  Engine  (privileged)           │
-│  PySide6 + controller      │  IPC   │  scanner · killer · forwarder   │
-│  no raw sockets, no pfctl  │◄──────►│  firewall backends · sysctl     │
-│                            │        │  (root helper on mac; elevated  │
-│                            │        │   process on win/linux)         │
-└────────────────────────────┘        └─────────────────────────────────┘
-```
+| Platform | Implemented path | Delivery limits |
+|----------|------------------|-----------------|
+| macOS | Administrator relaunch; persistent LaunchDaemon installed with an authorization prompt and `launchctl` | Persistent installation requires a frozen, root-owned protected app bundle and protected parent paths. Source/user-writable installations use one-time elevation. Signed SMAppService registration and notarization remain future work. |
+| Windows | Elevated application via UAC; WinDivert packaged through `pydivert` | Npcap is installed separately in normal releases. Explicit OEM bundling requires the appropriately licensed installer. |
+| Linux | Elevated application through PolicyKit (`pkexec`) or a direct root launch | Persistent-helper installation is not implemented. Never grant capabilities to a shared Python interpreter. |
 
-- **GUI** owns presentation and user intent only. It never opens a raw socket or
-  shells `pfctl`/`netsh` directly (today it does — that is the coupling we remove).
-- **Controller** (in-process, Qt-aware) mediates GUI events → engine calls, runs
-  long operations off the UI thread, and holds no packet logic.
-- **Engine** is the existing Qt-free core, elevated. On macOS it is reached
-  through the helper daemon over XPC/local socket; on Windows/Linux it runs in the
-  elevated app process (Phase 1) and may be split into a helper later.
+Unprivileged local operation is limited to discovery that does not require raw
+packet access. Capture, ARP control, forwarding, and firewall changes require
+administrator access. Packaged-app signing is separate from those privileges.
 
-## Kernel-level forwarding (the desync fix)
+### Forwarding and firewall scope
 
-A **kill** is pure ARP-poison blackhole and is already fine. The problem is
-**selective** blocking (one-way / lag / port / host), which must forward the
-*allowed* traffic while dropping the rest.
+| Platform | Forwarding | Filtering |
+|----------|------------|-----------|
+| macOS | `net.inet.ip.forwarding` | ArpCut PF anchor |
+| Linux | `net.ipv4.ip_forward` | Dedicated nftables table |
+| Windows | `IPEnableRouter` and service configuration | WinDivert for forwarded target traffic; named `arpcut_*` Windows Firewall rules where applicable |
 
-| OS | Forwarding today | Target |
-|----|------------------|--------|
-| macOS | `sysctl net.inet.ip.forwarding=1` + `pf` filter | keep; harden `pf` rules |
-| Linux | `sysctl net.ipv4.ip_forward=1` (+ firewall stub) | add `nftables` filter backend |
-| Windows | **none** — falls back to dead/slow user-space forwarder | **WinDivert** (or WFP + `IPEnableRouter`) kernel path |
+The Windows default drop mode filters in the driver; its optional counting mode
+uses a receive loop. Actual routing readiness depends on the host configuration
+and needs native smoke testing. The old `MitmForwarder` remains legacy code and
+is not the default forwarding path.
 
-The Python `MitmForwarder` (scapy `AsyncSniffer`, per-packet Python + checksum
-recompute) becomes a **last-resort fallback**, never the default path. On Windows
-it is currently *dead code with no callers* and the `netsh` selective-block rule
-targets the attacker host, not the victim — so Windows selective blocking is
-effectively non-functional today.
+Cleanup removes ArpCut-owned rules. It does not disable global forwarding:
+ownership of the previous system setting is not tracked, and another program
+may require it. Destination-IP host rules currently apply to all routed devices;
+port removal is also shared by port/protocol. The UI must describe those scopes
+accurately until narrower backend APIs exist.
 
 ## Domain map
 
-| Spec | Owns | Key change |
-|------|------|-----------|
-| `overview` | direction, roadmap | this file |
-| `platform` | ifaces, settings, constants, subprocess | drop Rust notes; fix `is_admin`; harden `terminal()` |
-| `privilege` | root helper daemon + typed command protocol + client | **built** (deploy pending) |
-| `networking` | scanner, killer, forwarder, sniffer | kernel forwarding; bug fixes; forwarder demoted |
-| `firewall` | one `tools/firewall.py` (pf/netsh/nft) + host blocklist | Linux nft; PSN/GTA presets; bug fixes; no adapter/legacy |
-| `gui` | PySide6 frosted-glass UI + controller + SVG icons | **built**; legacy `ui/*`/`assets.py`/`bridge.py`/`qtools.py` deleted |
-| `build` | packaging, installers, signing, CI | `.dmg`+helper, NSIS+Npcap, AppImage; sign/notarize |
+| Spec | Responsibility |
+|------|----------------|
+| `platform.spec.md` | Interface discovery, settings, constants, subprocess handling |
+| `privilege.spec.md` | Engine boundary, command validation, socket/session lifecycle, helper installation |
+| `networking.spec.md` | Scanning, ARP sessions, forwarding, DNS filters, capture |
+| `firewall.spec.md` | PF/nftables/Windows rule operations and host-block ownership |
+| `gui.spec.md` | Controller state, asynchronous work, dialogs and user-visible failures |
+| `build.spec.md` | Build paths, packaging, dependencies, release and test workflows |
 
-## Phased roadmap
+## Verification and remaining delivery work
 
-**Phase 0 — Stabilize (done).** App-breaking bugs fixed: `Scanner()` `NameError`,
-`is_admin()` on POSIX (honest euid), substring-match `unblock_ip`/`unblock_port`,
-silent Windows unblock reporting, `flush_arp` no-op, dead `_start_one_way_forwarder`
-removed, `_err` thread-safety. Keep the PyQt5 UI alive as a reference.
+Pull requests and pushes to `main` run unit/local-IPC tests on Linux, Windows,
+and macOS. Release builds have a test gate and package a Windows launcher and
+Inno installer, a macOS ZIP and DMG, and a Linux standalone binary. Existing
+v2.0.1 assets predate the DMG workflow change. Linux AppImage/deb packages are
+planned, not current release artifacts.
 
-**Phase 1 — One firewall module + host blocklist (done).** Consolidated to a
-single `tools/firewall.py` (pf / netsh / nft via platform branches; no interface,
-no adapter, no legacy `pfctl.py`), with the substring-unblock, silent-Windows-leak,
-non-idempotent-write and `_err` thread-safety bugs fixed. **Host blocklist**
-shipped: `psn-comms` (domain, resolves live) + `gta-save` (verified Rockstar IP),
-idempotent, reachable from `Killer.block_host`. Remaining: on-box Linux `nft`
-validation, UI wiring (Phase 4). See `firewall.spec.md`.
+Mocked tests cover rule construction, failure propagation, restoration order,
+worker cancellation, settings persistence, controller races, helper ownership,
+and install-command construction. These tests do not establish native driver,
+packet-routing, privileged installer, signing, or notarization behavior. Before
+a release, validate native capture/control/restore on each supported OS in a
+controlled network and test installation/uninstallation using the built assets.
 
-**Phase 2 — Windows kernel forwarding (WinDivert).** mac/linux already forward via
-the `enable_ip_forwarding()` sysctl + firewall drop rules. Windows needs a
-WinDivert kernel forwarder (intercept + re-inject, dropping filtered flows),
-written and validated on Windows — the real fix for the desync. Ties into driver
-bundling (installer) and privilege.
+Remaining engineering work includes ownership-aware global-forwarding restore,
+subnet-aware scanning beyond the current `/24` model, capture-history retention
+for long sessions, finer per-device rule-removal APIs, signed macOS helper
+registration, and Linux distribution packages. Keep these limits explicit;
+completion of the audit does not imply that future platform work is delivered.
 
-**Phase 3 — Privilege separation (built; deploy pending).** `src/privilege/`: a
-typed command protocol (fixed registry, per-arg validation, no arbitrary-exec
-verb), a root helper daemon (`Engine` + `HelperServer`) that owns the engine, and
-an unprivileged `HelperClient` — the Phase-4 GUI becomes the thin client. Remaining
-is the deploy only: `SMAppService` registration + `.app` bundling + signing (Dev ID
-available). Windows keeps UAC + bundles Npcap; Linux uses `setcap`/polkit. See
-`privilege.spec.md`.
+## Working conventions
 
-**Phase 4 — PySide6 UI rewrite (done).** A frosted-glass, device-centric UI on
-PySide6: `gui/app.py` (bootstrap), `gui/window.py` (presentation only),
-`gui/controller.py` (engine mediator + off-thread scan/tasks, absorbing
-`bridge.py`), `gui/theme.py` (one QSS + live dark/light proxy), `gui/icons.py`
-(SVG set + logo), `gui/widgets/*` (glass chrome, title bar, controls, device card)
-and six `gui/dialogs/*` (settings, blocker, traffic, lag, device, about). All
-legacy UI (`gui/*` PyQt5, `ui/*`, `assets.py`, `bridge.py`, `qtools.py`) and raster
-icons are deleted; `requirements.txt`/`build.py` moved to PySide6. Remaining: wire
-to `HelperClient` after the Phase-3 deploy; event streaming; full runtime theme
-repaint. See `gui.spec.md`.
-
-**Phase 5 — Installers.** Signed+notarized `.dmg` (with helper install), Windows
-NSIS/Inno installer bundling Npcap, Linux AppImage/`.deb`. CI drives `build.py`;
-release artifacts are installers, not raw binaries. The CI workflow
-(`build-release.yml`) now calls `build.py` on all OSes (dropping the stale
-PyQt5/qdarkstyle hidden-imports), gates on `pytest`, and the Windows job emits both
-the launcher exe and the Inno installer.
-
-## Working conventions (kept from prior guidance, de-ceremonied)
-
-- **Spec-first**: update the relevant spec when behavior/interfaces change.
-- **No silent unfinished work**: mark partial work with `TODO` comments in code.
-- **Verify before done**: run the domain's tests / a smoke import before claiming
-  completion.
-- Dropped: the Løp "bubble-agent write-gate" and Prisma/Zod rules — they are from
-  an unrelated TS monorepo and do not apply here.
+- **Spec-first:** update the relevant spec when behavior or interfaces change.
+- **No silent unfinished work:** document remaining behavior limits and partial
+  implementations rather than presenting them as complete.
+- **Verify before done:** run relevant tests and report platform checks that
+  could not be performed.
+- The older Løp/biolab write gates and Prisma/Zod rules describe an unrelated
+  TypeScript monorepo and do not apply here.

@@ -9,12 +9,13 @@ import subprocess
 import sys
 import platform
 from pathlib import Path
-from typing import NoReturn
+
+REPO_ROOT = Path(__file__).resolve().parent
 
 # Read version from the canonical source
 def _read_version() -> str:
     """Parse __version__ from constants.py without importing it."""
-    constants_path = Path(__file__).parent / 'src' / 'constants.py'
+    constants_path = REPO_ROOT / 'src' / 'constants.py'
     for line in constants_path.read_text().splitlines():
         if line.startswith('__version__'):
             return line.split('=', 1)[1].strip().strip("'\"")
@@ -96,7 +97,7 @@ def build() -> None:
     print(f"Command: {' '.join(cmd)}")
     print()
 
-    result: subprocess.CompletedProcess[bytes] = subprocess.run(cmd)
+    result: subprocess.CompletedProcess[bytes] = subprocess.run(cmd, cwd=REPO_ROOT)
 
     if result.returncode == 0:
         print()
@@ -119,8 +120,8 @@ def package_dmg() -> None:
     if platform.system() != 'Darwin':
         print("--dmg is macOS-only.")
         return
-    app = Path('dist') / f'ArpCut-{VERSION}.app'
-    script = Path(__file__).parent / 'packaging' / 'macos' / 'create_dmg.sh'
+    app = REPO_ROOT / 'dist' / f'ArpCut-{VERSION}.app'
+    script = REPO_ROOT / 'packaging' / 'macos' / 'create_dmg.sh'
     print(f"Packaging {app} → dmg ...")
     result = subprocess.run(['bash', str(script), str(app)])
     if result.returncode != 0:

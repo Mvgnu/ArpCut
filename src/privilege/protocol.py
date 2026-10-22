@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 PROTOCOL_VERSION = 1
+MAX_FRAME_BYTES = 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Argument validators
@@ -30,12 +31,12 @@ _IFACE_RE = re.compile(r'^[A-Za-z0-9._\\{}-]+$')
 
 
 def is_ipv4(v: Any) -> bool:
-    return isinstance(v, str) and bool(_IPV4_RE.match(v)) and \
+    return isinstance(v, str) and bool(_IPV4_RE.fullmatch(v)) and \
         all(0 <= int(p) <= 255 for p in v.split('.'))
 
 
 def is_mac(v: Any) -> bool:
-    return isinstance(v, str) and bool(_MAC_RE.match(v))
+    return isinstance(v, str) and bool(_MAC_RE.fullmatch(v))
 
 
 def is_port(v: Any) -> bool:
@@ -67,7 +68,7 @@ def is_domains(v: Any) -> bool:
 
 
 def is_iface(v: Any) -> bool:
-    return isinstance(v, str) and bool(_IFACE_RE.match(v))
+    return isinstance(v, str) and bool(_IFACE_RE.fullmatch(v))
 
 
 def is_nonempty_str(v: Any) -> bool:
@@ -130,7 +131,8 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
     Command('set_forwarding', (Arg('enabled', is_bool),), 'Toggle kernel IP forwarding.'),
     # -- primitives the GUI controller orchestrates over ---------------------
     Command('set_iface', (Arg('iface', is_iface),), 'Switch the active interface (re-init).'),
-    Command('set_scan_params', (Arg('count', is_pos_int), Arg('threads', is_pos_int)),
+    Command('set_scan_params', (Arg('count', lambda v: is_pos_int(v) and 2 <= v <= 255),
+                                Arg('threads', lambda v: is_pos_int(v) and v <= 64)),
             'Set scan address-count and thread pool size.'),
     Command('probe', (Arg('ip', is_ipv4),), 'Actively probe one IP; return [ip, mac] or null.'),
     Command('block_all_for', (Arg('ip', is_ipv4),), 'Firewall-drop all traffic for an IP (the real cut).'),
@@ -151,6 +153,8 @@ COMMANDS: dict[str, Command] = {c.name: c for c in (
 
 def validate(cmd: str, args: dict) -> Optional[str]:
     """Return an error string if (cmd, args) is invalid, else None."""
+    if not isinstance(cmd, str):
+        return 'command must be a string'
     command = COMMANDS.get(cmd)
     if command is None:
         return f'unknown command: {cmd}'
@@ -199,11 +203,26 @@ def encode(obj) -> bytes:
 
 
 def decode_request(line: bytes) -> Request:
+    if len(line) > MAX_FRAME_BYTES:
+        raise ValueError('request frame is too large')
     data = json.loads(line.decode('utf-8'))
-    return Request(cmd=data.get('cmd', ''), args=data.get('args') or {})
+    if not isinstance(data, dict):
+        raise ValueError('request must be an object')
+    req = Request(cmd=data.get('cmd', ''), args=data.get('args', {}))
+    if not isinstance(req.cmd, str):
+        raise ValueError('command must be a string')
+    if not isinstance(req.args, dict):
+        raise ValueError('args must be an object')
+    return req
 
 
 def decode_response(line: bytes) -> Response:
+    if len(line) > MAX_FRAME_BYTES:
+        raise ValueError('response frame is too large')
     data = json.loads(line.decode('utf-8'))
-    return Response(ok=bool(data.get('ok')), result=data.get('result'),
+    if not isinstance(data, dict) or not isinstance(data.get('ok'), bool):
+        raise ValueError('response must be an object with a boolean ok field')
+    if data.get('error') is not None and not isinstance(data['error'], str):
+        raise ValueError('response error must be a string or null')
+    return Response(ok=data['ok'], result=data.get('result'),
                     error=data.get('error'))

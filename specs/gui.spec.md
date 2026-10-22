@@ -108,6 +108,28 @@ MainWindow / dialogs (presentation) ──intent──▶ Controller ──▶ e
 - [x] Verified: 102 engine tests still green; window + all dialogs build & render
       offscreen; both themes render correctly.
 
+## Audit corrections (2026-10-22)
+
+- Controller operations serialize against background work. Restore All, interface
+  changes and shutdown invalidate queued work before cleanup; stale scan/task
+  completions cannot reapply blocks or overwrite the restored UI state. Shutdown
+  joins the scan and task workers before releasing the backend.
+- Failed engine actions retain tracked state and report failure. Removing a full
+  or one-way cut preserves routing needed by other active features. Lag release
+  timers are cancelled on stop/restart; the dialog offers only the supported
+  both-directions behavior.
+- The traffic engine has one active capture target. Switching targets releases
+  the previous monitor, and failed starts do not leave a phantom capture active.
+- A scan that changes or loses an actively routed device's address first clears
+  old rules and routing, then reapplies Cut, One-way and explicit routing only
+  for still-present non-admin MACs. DNS, port, host and capture rules are reset
+  with an explicit status message rather than affecting a newly assigned owner
+  of the old IP. A failed cleanup prevents reapplication. Unchanged scans retain
+  their rules without a disruptive unblock/reblock cycle.
+- DNS preset switches reflect and remove only their own names. Destination-IP
+  rules are described as shared across routed devices, matching engine scope.
+- Linux offers temporary elevation, not persistent helper installation.
+
 ## Remaining (later phases)
 
 - [ ] Wire the controller to `HelperClient` once the macOS helper is deployed

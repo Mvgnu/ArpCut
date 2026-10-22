@@ -39,8 +39,8 @@ verification:
 
 # Networking Domain
 
-The Qt-free core of ArpCut. Confirmed: no module here imports PyQt — the whole
-domain is reusable behind the new controller and (later) the privileged helper.
+The Qt-free core of ArpCut. Networking modules are shared by the GUI controller
+through the local or remote privileged engine.
 
 ## Components
 
@@ -55,16 +55,16 @@ ARP cache). Device record is the canonical `DeviceInfo` TypedDict
 ARP-spoof engine: `kill`/`unkill` (re-poison every 2s — safe vs 30–120s cache),
 `kill_all`/`unkill_all`, `one_way_kill`, `store`/`rekill_stored`. Holds a
 persistent L2 socket to avoid Windows socket exhaustion. `enable_ip_forwarding()`
-lives here and toggles the kernel forwarding sysctl (mac/linux only today).
+uses the macOS/Linux routing sysctl or Windows routing configuration.
 
 ### MitmForwarder (`forwarder.py`) — Windows fallback only
 User-space forwarder (scapy `AsyncSniffer`, per-packet MAC rewrite + checksum
 recompute). **The slow path — never the default.** `Killer` holds **no** forwarder
-state anymore: the dead per-victim `forwarders` dict, `_start_one_way_forwarder`,
+state for this class anymore: the dead per-victim `forwarders` dict, `_start_one_way_forwarder`,
 `_stop_forwarder` and `get_forwarder_stats` are removed. The only remaining user is
 the traffic monitor's optional "forward mode", which is **redundant on mac/linux**
-(the kernel forwards once `enable_ip_forwarding()` is on) and matters only on
-Windows until WinDivert replaces it — at which point `forwarder.py` can be deleted.
+(the kernel forwards once `enable_ip_forwarding()` is on). Windows now uses
+WinDivert for the default policy path; this legacy class remains optional.
 
 ### TrafficSniffer (`sniffer.py`)
 Live per-device monitoring: flows, patterns, hex/last-packet inspection.
@@ -72,22 +72,22 @@ Live per-device monitoring: flows, patterns, hex/last-packet inspection.
 ### NetFace (`ifaces.py`) / Nicknames (`nicknames.py`)
 Interface data class (`name`, `guid`, `mac`, `ip`) and JSON-backed nickname store.
 
-## Kernel-level forwarding (target)
+## Kernel-level forwarding
 
-Selective blocking forwards allowed traffic and drops the rest. Move forwarding
-into the kernel everywhere:
+Selective blocking uses platform forwarding and filtering facilities:
 
-- **macOS**: `sysctl net.inet.ip.forwarding=1` + `pf` filter (works today; harden).
-- **Linux**: `sysctl net.ipv4.ip_forward=1` + **`nftables`** filter (add backend).
-- **Windows**: **WinDivert** kernel path (or WFP + registry `IPEnableRouter`).
-  This replaces the dead user-space path.
+- **macOS**: `sysctl net.inet.ip.forwarding=1` and the ArpCut PF anchor.
+- **Linux**: `sysctl net.ipv4.ip_forward=1` and a dedicated nftables table.
+- **Windows**: `IPEnableRouter` routing configuration and WinDivert
+  `NETWORK_FORWARD` filters.
 
 `one_way_kill` / lag / port / host blocks then become: ARP-poison to steer
 traffic through us → kernel forwards at native speed → firewall backend drops the
 specific flows. No Python in the packet hot path.
 
-**Status**: mac/linux kernel forwarding is a real `enable_ip_forwarding()` sysctl
-in `killer.py` (called once in `Killer.__init__`). Windows now has a real path too:
+**Status**: `enable_ip_forwarding()` is called by modes that require forwarding,
+such as spoof, one-way, and selective blocking; construction alone does not
+enable it. Windows has a corresponding configuration path:
 `enable_ip_forwarding()` sets the `IPEnableRouter` registry flag (the sysctl
 analogue) and `one_way_kill` starts a **WinDivert** `NETWORK_FORWARD` drop for the
 victim's outbound (`windivert_forwarder.py`). The filter matches only the flows to
@@ -109,13 +109,15 @@ validation needs an elevated run against a real victim.
    *attacker's* host, not the victim's forwarded traffic). The netsh block is kept
    as a portable backstop. Live-traffic validation against a real victim is still
    recommended before the next Windows release.
-3. **`conf.iface` global mutation** in `Killer.__init__` (`killer.py:43`) —
-   process-global side effect; scope it or restore it.
-4. **`devices_appender` race**: rebuilds `self.devices` without holding `_lock`
-   despite the docstring claim; races GUI reads.
+3. ~~**`conf.iface` global mutation** in `Killer.__init__`~~ — **fixed**:
+   sockets and sends use their explicit instance interface without changing the
+   process-global Scapy default.
+4. ~~**`devices_appender` published a partially rebuilt list**~~ — **fixed**:
+   complete snapshots are built locally and published under `_lock`.
 5. ~~**`flush_arp` (unix)** `arp -a > /dev/null | cat` no-op~~ — **fixed**: now
    `arp -d -a` (macOS) / `ip -s -s neigh flush all` (Linux), best-effort.
-6. **`get_gateway_mac` (unix)** token scan can match non-MAC/IPv6 tokens.
+6. ~~**`get_gateway_mac` (unix)** scanned arbitrary colon-containing tokens~~ —
+   **fixed**: it matches six hexadecimal MAC-address groups and normalizes them.
 7. **Silent privilege failures**: L2 socket / BPF errors are swallowed; pair with
    the `privilege` domain's honest `is_admin` + banner.
 
@@ -150,5 +152,44 @@ resolved by the scanner; do not block against the dummy.
 - [x] Locale-robust netsh: firewall state via registry (not the localized 'ON'),
       rule readback via the `arpcut_*` token (not the localized 'Rule Name:').
 - [ ] Validate the Linux nft forward-hook chain end-to-end on a real Linux host.
-- [ ] Lock `devices` rebuild; scope `conf.iface`; fix `get_gateway_mac` heuristic.
-- [ ] Unit tests with mocked scapy (scan parsing, kill packet construction).
+- [x] Scope interfaces to each operation and use MAC-aware gateway parsing.
+- [x] Publish complete scan snapshots under the scanner lock.
+- [x] Add mocked packet construction, restoration, and policy failure tests.
+
+## Lifecycle audit (2026-10-22)
+
+- `unkill` and `unkill_all` synchronously stop the corresponding poison sessions
+  and send corrective ARP mappings before closing their L2 socket. Restore All
+  batches the three repetitions across all devices. Canceled poison workers use
+  separate events and cannot revive when the same MAC is routed again.
+- Failed restoration keeps the captured device in `_restore_pending` for retry,
+  without leaving poisoning enabled. Firewall deletion failures retain their
+  bookkeeping too. An address change restores the old device mapping before
+  creating the new routing session.
+- Spoof/one-way setup verifies forwarding before redirecting traffic, so a
+  failed sysctl/registry operation does not silently disconnect the device.
+- Policy setup returns its actual result through `kill`, `kill_all`,
+  `one_way_kill`, and `lag`. A missing Windows driver or rejected one-way policy
+  does not create a new routing session. WinDivert policy replacement leaves
+  the old handle active until its replacement has started successfully.
+- POSIX one-way mode requests an outbound-only rule. In particular, Linux no
+  longer installs the two-direction whole-device policy for that mode.
+- `TrafficSniffer.start` waits for capture readiness and reports startup errors.
+  Captures use a bounded timeout even on an idle interface; stop joins the worker
+  before restart. Each session receives a fresh cancellation event and empty
+  flow state. Public flow/pattern snapshots are independent copies.
+- DNS capture and WinDivert workers close handles on startup/stop races and
+  receive failures. `DnsSpoofer.clear()` additionally forgets the session's names.
+- Deep scan uses one-packet pings capped at one second per child, with progress
+  completion in `finally`. The helper validates count/thread limits and supplies
+  a separate long-running scan deadline.
+- Scan results deduplicate normalized MAC addresses, reject local/router MAC
+  aliases, and publish complete snapshots. Probe cache parsing matches exact IP
+  addresses instead of treating an address prefix as a match. Mocked scanner
+  regressions are in `tests/test_scanner_regressions.py`.
+- Mocked regressions are in `tests/test_network_cleanup.py`; they send no packets
+  and alter no host firewall or routing state.
+
+Global forwarding changes are still persistent OS configuration. Cleanup restores
+devices/rules but does not guess whether another application depends on forwarding
+and must not blindly disable it.

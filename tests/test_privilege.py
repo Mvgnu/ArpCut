@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import threading
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -164,29 +165,38 @@ def test_handle_engine_error_becomes_error_response():
 
 # ---- client ↔ server loopback (real sockets) -------------------------------
 
+requires_helper_socket = pytest.mark.skipif(
+    sys.platform != 'darwin' and not sys.platform.startswith('linux'),
+    reason='root helper peer credentials use Linux/macOS Unix sockets',
+)
+
 def _loopback_call(cmd, **args) -> Response:
     a, b = socket.socketpair()
     engine = MockEngine()
-    t = threading.Thread(target=HelperServer(engine).serve_connection,
+    t = threading.Thread(target=HelperServer(engine)._serve_and_close,
                          args=(b,), daemon=True)
     t.start()
     try:
         return HelperClient(connect=lambda: a).call(cmd, **args), engine
     finally:
-        b.close()
+        a.close()
+        t.join(1)
 
 
+@requires_helper_socket
 def test_loopback_ping():
     resp, _ = _loopback_call('ping')
     assert resp.ok and resp.result == 'pong'
 
 
-def test_loopback_block_host_end_to_end():
+@requires_helper_socket
+def test_loopback_mutation_requires_persistent_session():
     resp, engine = _loopback_call('block_host', target='gta-save')
-    assert resp.ok and resp.result['key'] == 'psn-comms'  # mock returns fixed key
-    assert engine.calls and engine.calls[0][0] == 'block_host'
+    assert not resp.ok and 'subscribed GUI session' in resp.error
+    assert engine.calls == []
 
 
+@requires_helper_socket
 def test_loopback_bad_request_json():
     a, b = socket.socketpair()
     threading.Thread(target=HelperServer(MockEngine()).serve_connection,

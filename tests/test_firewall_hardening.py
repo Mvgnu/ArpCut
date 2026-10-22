@@ -66,3 +66,35 @@ def test_error_state_roundtrip():
     e.clear()
     assert e.get() == ''
     assert hasattr(e, '_lock')
+
+
+def test_pf_clear_does_not_claim_success_when_kernel_reload_fails(monkeypatch, tmp_path):
+    from tools import firewall as fw
+
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr(fw, '_anchor_file', lambda: str(tmp_path / 'arpcut'))
+    monkeypatch.setattr(fw, '_exec', lambda *a: CompletedProcess(
+        [], 1, '', 'pfctl denied'))
+    assert not fw.clear_anchor()
+    assert fw.last_error() == 'pfctl denied'
+
+
+def test_windows_cleanup_covers_every_owned_rule_family_and_keeps_failures(monkeypatch):
+    from tools import firewall as fw
+
+    names = ['arpcut_block_192_0_2_1_out', 'arpcut_192_0_2_1_to_198_51_100_1',
+             'arpcut_port_443_tcp_in']
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if 'show' in argv:
+            return CompletedProcess(argv, 0, '\n'.join('Regelname: ' + n for n in names), '')
+        return CompletedProcess(argv, 1 if argv[-1] == 'name=' + names[0] else 0,
+                                '', 'deletion denied' if argv[-1] == 'name=' + names[0] else '')
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(fw, '_exec', run)
+    assert fw.clear_all_rules() is False
+    assert [c[-1] for c in calls[1:]] == ['name=' + n for n in names]
+    assert fw.last_error() == 'deletion denied'

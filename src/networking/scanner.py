@@ -137,13 +137,17 @@ class Scanner():
 
     def devices_appender(self, scan_result: list[tuple[str, str]]) -> None:
         """
-        Append scan results to self.devices.
-        Thread-safe: acquires ``_lock`` before mutating ``self.devices``.
+        Publish a complete device snapshot, with one record per normalized MAC.
+
+        Prefer a changed address over the previous address when both appear in
+        the cache. Build records locally so readers never see a partial rebuild.
         """
         nicknames = Nicknames()
-
-        self.devices = []
-        unique = []
+        with self._lock:
+            old_ips = dict(self.old_ips)
+        selected: dict[str, str] = {}
+        protected_ips = {self.router_ip, self.my_ip}
+        protected_macs = {good_mac(self.router_mac), good_mac(self.my_mac)}
 
         # Sort by last part of ip xxx.xxx.x.y
         scan_result = sorted(
@@ -154,16 +158,16 @@ class Scanner():
         for ip, mac in scan_result:
             mac = good_mac(mac)
 
-            # Skip me or router and duplicated devices
-            if ip in [self.router_ip, self.my_ip] or mac in unique:
+            # Router/local aliases must never become controllable user devices.
+            if ip in protected_ips or mac in protected_macs:
                 continue
-            
-            # update same device with new ip
-            if self.old_ips.get(mac, ip) != ip:
-                self.old_ips[mac] = ip
-                unique.append(mac)
+            if mac not in selected or (
+                    selected[mac] == old_ips.get(mac) and ip != old_ips[mac]):
+                selected[mac] = ip
 
-            self.devices.append(
+        devices: list[DeviceInfo] = []
+        for mac, ip in sorted(selected.items(), key=lambda item: int(item[1].split('.')[-1])):
+            devices.append(
                 {
                     'ip':     ip,
                     'mac':    mac,
@@ -173,21 +177,20 @@ class Scanner():
                     'admin':  False
                 }
             )
-        
-        # Remove device with old ip
-        for device in self.devices[:]:
-            mac, ip = device['mac'], device['ip']
-            if self.old_ips.get(mac, ip) != ip:
-                self.devices.remove(device)
-        
-        # Re-create devices old ips dict
-        self.old_ips = {d['mac']: d['ip'] for d in self.devices}
 
-        self.add_me()
-        self.add_router()
+        protected: list[DeviceInfo] = [
+            {'ip': ip, 'mac': mac, 'vendor': get_vendor(mac), 'type': kind,
+             'name': '', 'admin': True}
+            for ip, mac, kind in ((self.router_ip, self.router_mac, 'Router'),
+                                  (self.my_ip, self.my_mac, 'Me'))
+        ]
+        with self._lock:
+            self.old_ips = {d['mac']: d['ip'] for d in devices}
+            self.router, self.me = protected
+            self.devices = protected + devices
 
         # Clear arp cache to avoid duplicates next time
-        if unique:
+        if any(old_ips.get(mac, ip) != ip for mac, ip in selected.items()):
             self.flush_arp()
     
     def arping_cache(self) -> None:
@@ -297,13 +300,21 @@ class Scanner():
         """
         Ping a specific ip with native command "ping -n"
         """
-        if sys.platform.startswith('win'):
-            terminal(f'ping -n 1 {ip}', decode=False)
-        else:
-            # macOS: -W is millis for some ping variants; use higher timeout via -t if available
-            terminal(f'ping -c 1 {ip}', decode=False)
-        with self._lock:
-            self.__ping_done += 1
+        try:
+            if sys.platform.startswith('win'):
+                command = ['ping', '-n', '1', '-w', '750', ip]
+            elif sys.platform == 'darwin':
+                command = ['ping', '-c', '1', '-W', '750', ip]
+            else:
+                command = ['ping', '-c', '1', '-W', '1', ip]
+            # Independent of ping's platform-specific flags, cap each child so
+            # a 254-address, single-worker sweep stays within the scan deadline.
+            terminal(command, decode=False, timeout=1.0)
+        except OSError as exc:
+            log.debug('Ping failed for %s: %s', ip, exc)
+        finally:
+            with self._lock:
+                self.__ping_done += 1
 
     def probe_ip(self, ip: str) -> Optional[tuple]:
         """
@@ -393,19 +404,11 @@ class Scanner():
                             if mac and mac != GLOBAL_MAC:
                                 self.devices_appender([(ip, mac)])
                                 return (ip, mac)
-                        # Also check if IP appears anywhere in the line
-                        elif ip in line:
-                            # Extract MAC using regex
-                            macs = findall(r'([0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2})', line)
-                            if macs:
-                                mac = good_mac(macs[0])
-                                if mac and mac != GLOBAL_MAC:
-                                    self.devices_appender([(ip, mac)])
-                                    return (ip, mac)
         else:
             cache = terminal('arp -an') or ''
             for line in cache.split('\n'):
-                if ip in line:
+                addresses = findall(r'\(([^)]+)\)', line)
+                if addresses and addresses[0] == ip:
                     macs = findall(r'([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', line)
                     if macs:
                         mac = good_mac(macs[0])

@@ -1,6 +1,10 @@
 import os
+from collections.abc import Mapping
+from copy import deepcopy
 from os import path, makedirs, rename
-from json import dump, load, JSONDecodeError
+from json import dump, load
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any, Optional
 import ctypes
 import sys
@@ -9,11 +13,12 @@ try:
 except ImportError:
     winreg = None  # Not available on macOS/Linux
 
-from tools.utils import terminal
 from constants import (
     DOCUMENTS_PATH, SETTINGS_PATH, OLD_DOCUMENTS_PATH, OLD_SETTINGS_PATH,
     NPCAP_PATH, HKEY_AUTOSTART_PATH, SETTINGS_KEYS, SETTINGS_VALS,
 )
+
+_settings_lock = RLock()
 
 
 def is_admin() -> bool:
@@ -52,26 +57,47 @@ def check_documents_dir() -> None:
 
 def import_settings() -> dict[str, Any]:
     """Load stored settings from JSON file."""
-    check_documents_dir()
-    with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
-        result: dict[str, Any] = load(f)
-    return result
+    with _settings_lock:
+        check_documents_dir()
+        with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+            stored = load(f)
+        if not isinstance(stored, dict):
+            raise ValueError('Settings must be a JSON object')
+        result = deepcopy(dict(zip(SETTINGS_KEYS, SETTINGS_VALS)))
+        result.update(stored)
+        return result
 
 
-def export_settings(values: Optional[list[Any]] = None) -> None:
-    """Persist settings to JSON file. Creates new file if needed."""
-    keys = SETTINGS_KEYS
-    vals = values if values else SETTINGS_VALS
-    settings = dict(zip(keys, vals))
-    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-        dump(settings, f)
+def export_settings(values: Optional[list[Any] | Mapping[str, Any]] = None) -> None:
+    """Atomically save settings by key, retaining the legacy list API."""
+    with _settings_lock:
+        settings = deepcopy(dict(zip(SETTINGS_KEYS, SETTINGS_VALS)))
+        if isinstance(values, Mapping):
+            settings.update(values)
+        elif values is not None:
+            settings.update(zip(SETTINGS_KEYS, values))
+        directory = path.dirname(SETTINGS_PATH) or '.'
+        makedirs(directory, exist_ok=True)
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory,
+                                    prefix='.arpcut-', suffix='.json', delete=False) as f:
+                temporary = f.name
+                dump(settings, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, SETTINGS_PATH)
+        finally:
+            if temporary is not None and path.exists(temporary):
+                os.unlink(temporary)
 
 
 def set_settings(key: str, value: Any) -> None:
     """Update a single setting by key."""
-    s = import_settings()
-    s[key] = value
-    export_settings(list(s.values()))
+    with _settings_lock:
+        s = import_settings()
+        s[key] = value
+        export_settings(s)
 
 
 def get_settings(key: str) -> Any:
@@ -81,16 +107,12 @@ def get_settings(key: str) -> Any:
 
 def repair_settings() -> None:
     """Merge stored settings with defaults to handle schema upgrades."""
-    original = dict(zip(SETTINGS_KEYS, SETTINGS_VALS))
-
-    try:
-        s = import_settings()
-        for key in s:
-            original[key] = s[key]
-    except JSONDecodeError:
-        pass
-
-    export_settings(list(original.values()))
+    with _settings_lock:
+        try:
+            settings = import_settings()
+        except (ValueError, UnicodeError):
+            settings = None
+        export_settings(settings)
 
 
 def migrate_settings_file() -> None:

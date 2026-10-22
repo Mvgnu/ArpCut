@@ -8,7 +8,7 @@ import os
 import json
 from datetime import datetime
 
-sys.path.append(os.path.join(os.getcwd(), 'src'))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
 def section(title):
     print(f"\n{'='*60}")

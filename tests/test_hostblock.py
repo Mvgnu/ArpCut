@@ -141,3 +141,83 @@ def test_block_failure_is_reported_and_not_tracked():
     res = bl.block('psn-comms', 'en0')
     assert res.failed == {'2.2.2.2'} and res.added == {'1.1.1.1'}
     assert bl.active() == {'psn-comms': {'1.1.1.1'}}   # failed IP not tracked
+
+
+def test_shared_address_is_removed_only_after_last_owner():
+    bl, fw = make({'one.example': {'1.1.1.1'}, 'two.example': {'1.1.1.1'}})
+    bl.block('one.example', 'en0')
+    bl.block('two.example', 'en0')
+    assert fw.block_calls == ['1.1.1.1']
+    assert bl.unblock('one.example')
+    assert fw.blocked == {'1.1.1.1'}
+    assert fw.unblock_calls == []
+    assert bl.unblock('two.example')
+    assert fw.blocked == set()
+
+
+def test_failed_unblock_is_tracked_and_retryable():
+    bl, fw = make()
+    bl.block('1.1.1.1', 'en0')
+    real_unblock = bl._unblock_ip
+    bl._unblock_ip = lambda ip: False
+    assert not bl.unblock('1.1.1.1')
+    assert bl.active() == {'1.1.1.1': {'1.1.1.1'}}
+    bl._unblock_ip = real_unblock
+    assert bl.clear()
+    assert bl.active() == {} and fw.blocked == set()
+
+
+def test_refresh_preserves_other_owners_and_reports_failed_deletion():
+    resolved = {'one.example': {'1.1.1.1'}, 'two.example': {'1.1.1.1'}}
+    bl, fw = make(resolved)
+    bl.block('one.example', 'en0')
+    bl.block('two.example', 'en0')
+    resolved['one.example'] = {'2.2.2.2'}
+    bl.refresh('en0')
+    assert fw.blocked == {'1.1.1.1', '2.2.2.2'}
+    resolved['two.example'] = {'3.3.3.3'}
+    bl._unblock_ip = lambda ip: False
+    result = bl.refresh('en0')['two.example']
+    assert result.failed == {'1.1.1.1'} and not result.ok
+    assert bl.active()['two.example'] == {'1.1.1.1', '3.3.3.3'}
+
+
+def test_temporary_dns_failure_keeps_owned_rules():
+    resolved = {'one.example': {'1.1.1.1'}}
+    bl, fw = make(resolved)
+    bl.block('one.example', 'en0')
+    resolved['one.example'] = set()
+    assert not bl.refresh('en0')['one.example'].ok
+    assert bl.active() == {'one.example': {'1.1.1.1'}}
+    assert fw.unblock_calls == []
+
+
+def test_dns_parser_rejects_mismatch_and_truncation():
+    import struct
+    import pytest
+    from networking.hostblock import _parse_dns_a_response
+
+    question = b'\x07example\x04test\x00\x00\x01\x00\x01'
+    header = struct.pack('>HHHHHH', 1234, 0x8180, 1, 1, 0, 0)
+    answer = b'\xc0\x0c' + struct.pack('>HHIH', 1, 1, 60, 4) + bytes([192, 0, 2, 1])
+    response = header + question + answer
+    assert _parse_dns_a_response(response, 1234, question) == {'192.0.2.1'}
+    assert _parse_dns_a_response(response, 9999, question) == set()
+    for truncated in (b'', response[:-1], header + question + b'\xc0'):
+        with pytest.raises(ValueError):
+            _parse_dns_a_response(truncated, 1234, question)
+
+
+def test_resolver_treats_malformed_public_response_as_failure(monkeypatch):
+    from networking import hostblock
+    import socket
+
+    def no_system(*a, **kw):
+        raise socket.gaierror('offline')
+
+    def malformed(*a, **kw):
+        raise ValueError('Truncated DNS header')
+
+    monkeypatch.setattr(hostblock.socket, 'getaddrinfo', no_system)
+    monkeypatch.setattr(hostblock, '_dns_a_query', malformed)
+    assert hostblock.resolve_ipv4('example.test') == set()

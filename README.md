@@ -32,7 +32,7 @@ vendor, IP/MAC, nickname, and live state.
 |--------|--------------|
 | **Cut / Restore** | Takes the device off the internet for real — ARP redirect **+** firewall drop, so it's a true cut even while kernel forwarding is on. |
 | **One-way** | Blocks only the device's *outbound* traffic. |
-| **Lag switch** | Intermittent lag — configurable on/off intervals and direction. |
+| **Lag switch** | Intermittent full-device blocking with configurable on/off intervals. |
 | **Traffic monitor** | Routes the device through this machine and shows its live flows (push-updated, not polled). It stays online while you watch. |
 | **Cut All / Restore All** | The same, network-wide. |
 
@@ -46,6 +46,10 @@ vendor, IP/MAC, nickname, and live state.
   public-DNS fallback).
 - **Curated presets** — PSN party/host-migration (DNS) and GTA-Online save block
   (verified Rockstar IP).
+
+Destination-IP/domain rules apply to all devices currently routed through ArpCut.
+Removing a port/protocol rule clears that rule for all devices. DNS-name rules
+remain per device, and toggling a DNS preset preserves unrelated custom names.
 
 <p align="center">
   <img src="assets/screenshots/blocker.png" alt="Blocker" width="380">
@@ -66,11 +70,19 @@ without a terminal:
 
 - Launch it; if it isn't privileged, a banner offers **Set Up Access**.
 - **Grant Administrator Access** relaunches ArpCut elevated (native password prompt).
-- **Install Background Helper** installs a small root daemon (`com.arpcut.helper`), the
-  same model as Wireshark / Little Snitch — the unprivileged GUI then drives it over a
-  local socket while holding no privilege itself.
-- **Nothing is left blocked when you quit or crash.** The GUI holds a session to the
-  helper; when it drops, the helper restores every device and clears every rule.
+- **Install Background Helper** on macOS installs a root daemon
+  (`com.arpcut.helper`) for a packaged app in a protected, root-managed location.
+  Source checkouts and user-writable app bundles must use administrator relaunch.
+  The helper's local socket accepts only root and the authorized installing user,
+  with one GUI session owning network operations at a time.
+- **Session cleanup** restores tracked devices and clears ArpCut's rules when the
+  GUI disconnects from the helper, including a GUI crash. Cleanup failures are
+  reported instead of shown as successful restores. Force-killing the helper or
+  an in-process elevated app cannot execute cleanup; stale firewall rules can
+  be removed with the elevated `--flush-firewall` command.
+- **Linux** uses administrator relaunch through `pkexec`; persistent helper
+  installation is not implemented. ArpCut does not grant capabilities to the
+  Python interpreter.
 
 <p align="center">
   <img src="assets/screenshots/setup-access.png" alt="Set Up Access" width="420">
@@ -84,9 +96,9 @@ without a terminal:
 
 | Platform | Artifact | Notes |
 |----------|----------|-------|
-| macOS | `ArpCut-<ver>.dmg` | Drag to Applications. Unsigned builds: right-click → **Open** the first time. |
-| Windows | `ArpCut-<ver>-Setup.exe` | Inno Setup installer; bundles the **Npcap** driver. |
-| Linux | AppImage / `.deb` | `setcap`/polkit for privileges. |
+| macOS | `.app` in `ArpCut-macOS.zip`; new builds also produce `ArpCut-<ver>.dmg` | Drag to Applications. Unsigned builds: right-click → **Open** the first time. |
+| Windows | `ArpCut-<ver>-Setup.exe` or standalone `.exe` | Inno Setup installer. Install **Npcap** separately; current default builds do not bundle it. |
+| Linux | `ArpCut-<ver>` standalone executable | Administrator relaunch via `pkexec`. AppImage / `.deb` packaging is not implemented. |
 
 On first launch, use **Set Up Access** (above).
 
@@ -111,8 +123,9 @@ python build.py            # → dist/ArpCut-<ver>.app  (or .exe / binary)
 python build.py --dmg      # macOS → dist/ArpCut-<ver>.dmg  (drag-to-Applications)
 ```
 
-- **Windows:** drop `packaging/windows/vendor/npcap.exe`, then
-  `iscc /DMyAppVersion=<ver> packaging\windows\arpcut.iss`.
+- **Windows:** `iscc /DMyAppVersion=<ver> packaging\windows\arpcut.iss`.
+  Optional Npcap bundling requires a licensed OEM redistribution package and an
+  explicit build flag; see `packaging/README.md`.
 - **Signing / notarization** (macOS Developer ID) is optional but removes the
   Gatekeeper prompt — see `packaging/README.md`. The app binary doubles as the root
   helper daemon (`--helper`), so no separate helper binary is shipped.
@@ -136,8 +149,21 @@ PySide6 GUI ──intent──▶ Controller ──▶ ops backend ──▶ eng
   engine, two transports.
 
 The `specs/` directory documents each domain (overview, platform, privilege, networking,
-firewall, gui, build). The engine has zero Qt imports and is covered by ~120 unit tests
-(`tests/`), including a real client↔helper socket loopback.
+firewall, gui, build). The engine has zero Qt imports. Tests in `tests/` use mocked
+network operations and real local client↔helper socket loopbacks.
+
+## Development checks
+
+```bash
+pip install -r requirements-dev.txt
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
+
+On Windows, set `QT_QPA_PLATFORM=offscreen` in the environment before running
+`python -m pytest -q`. The pytest configuration selects only `tests/`; diagnostic
+scripts that change network or firewall state are manual tools. Pull-request CI
+runs the suite on Linux, macOS, and Windows, with an additional Linux Python 3.12
+job. Release builds retain their own test gate.
 
 ---
 

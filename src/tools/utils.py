@@ -4,6 +4,7 @@ This module is the main platform abstraction layer in ArpCut.  It wraps scapy,
 system commands, and OUI lookups behind a common interface.
 """
 import logging
+from functools import wraps
 import re
 import shlex
 import subprocess
@@ -34,7 +35,7 @@ p: manuf.MacParser = manuf.MacParser()
 NO_WINDOW: int = 0x08000000 if sys.platform.startswith('win') else 0  # CREATE_NO_WINDOW
 
 
-def terminal(command, decode: bool = True) -> Optional[str]:
+def terminal(command, decode: bool = True, *, timeout: float = 30.0) -> Optional[str]:
     """Run a command WITHOUT a shell and return stdout, or None on failure.
 
     ``command`` may be an argv list or a string (split with ``shlex``). Running
@@ -43,17 +44,17 @@ def terminal(command, decode: bool = True) -> Optional[str]:
     ``shell=True`` injection surface. Commands that genuinely needed a pipe are
     rewritten to filter their output in Python instead.
     """
-    args = shlex.split(command, posix=not sys.platform.startswith('win')) \
-        if isinstance(command, str) else command
     try:
-        out = check_output(args, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+        args = shlex.split(command, posix=not sys.platform.startswith('win')) \
+            if isinstance(command, str) else command
+        out = check_output(args, stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
+                           timeout=timeout)
         return out.decode('utf-8', errors='replace') if decode else None
     except CalledProcessError as e:
-        if getattr(e, 'output', None):
-            try:
-                return e.output.decode('utf-8', errors='replace') if decode else None
-            except (UnicodeDecodeError, AttributeError):
-                pass
+        log.debug('terminal() command exited with status %s', e.returncode)
+        return None
+    except subprocess.TimeoutExpired:
+        log.debug('terminal() command exceeded %.1fs', timeout)
         return None
     except (OSError, ValueError) as e:  # ValueError: shlex on malformed quoting
         log.debug('terminal() command failed: %s', e)
@@ -62,8 +63,9 @@ def terminal(command, decode: bool = True) -> Optional[str]:
 
 def threaded(fn: Callable[..., Any]) -> Callable[..., Thread]:
     """Decorator to run a function in a daemon Thread."""
+    @wraps(fn)
     def run(*k: Any, **kw: Any) -> Thread:
-        t = Thread(target=fn, args=k, kwargs=kw)
+        t = Thread(target=fn, args=k, kwargs=kw, daemon=True)
         t.start()
         return t
     return run

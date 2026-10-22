@@ -6,7 +6,7 @@ Run on Windows or with: python test_windows_compat.py
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
 def section(title):
     print(f"\n{'='*50}")
@@ -50,8 +50,8 @@ for mod_name, desc in modules:
 # Test 2: GUI Imports (may fail without display)
 section("2. GUI Module Imports")
 gui_modules = [
-    ('gui.main', 'Main window'),
-    ('gui.traffic', 'Traffic window'),
+    ('gui.window', 'Main window'),
+    ('gui.dialogs.traffic_dialog', 'Traffic window'),
 ]
 
 for mod_name, desc in gui_modules:
@@ -59,8 +59,8 @@ for mod_name, desc in gui_modules:
         __import__(mod_name)
         ok(f"{desc} ({mod_name})")
     except ImportError as e:
-        if 'PyQt5' in str(e) or 'display' in str(e).lower():
-            print(f"  ⚠ {desc}: PyQt5/display not available (expected in headless)")
+        if 'PySide6' in str(e) or 'display' in str(e).lower():
+            print(f"  ⚠ {desc}: PySide6/display not available (expected in headless)")
         else:
             fail(f"{desc}: {e}")
             all_passed = False

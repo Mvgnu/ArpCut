@@ -26,6 +26,7 @@ def main() -> int:
     theme.apply(app, dark=bool(get_settings('dark')))
 
     controller = Controller()
+    app.aboutToQuit.connect(controller.shutdown)
     window = MainWindow(controller)
     window.show()
     controller.start()

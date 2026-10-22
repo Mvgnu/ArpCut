@@ -14,10 +14,12 @@ without actually triggering a privilege prompt.
 from __future__ import annotations
 
 import os
+import ctypes
+from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
-import tempfile
 
 from privilege.service import HELPER_LABEL, SOCKET_PATH, launchd_plist
 
@@ -75,7 +77,7 @@ def helper_argv() -> list[str]:
     (it already bundles everything); dev → an interpreter bootstrap that injects
     ``src`` onto ``sys.path`` and runs the daemon."""
     if getattr(sys, 'frozen', False):
-        return [sys.executable, '--helper']
+        return [os.path.realpath(sys.executable), '--helper']
     src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     boot = (f'import sys; sys.path.insert(0, {src!r}); '
             f'from privilege.helper import main; sys.exit(main())')
@@ -84,19 +86,110 @@ def helper_argv() -> list[str]:
 
 # -- macOS -------------------------------------------------------------------
 
-def macos_daemon_plist() -> str:
-    return launchd_plist(helper_argv())
+def _installing_uid() -> int:
+    uid = getattr(os, 'getuid', lambda: 0)()
+    if uid != 0:
+        return uid
+    original = os.environ.get('SUDO_UID', '')
+    if original.isascii() and original.isdecimal() and 0 < int(original) < 2**32 - 1:
+        return int(original)
+    if sys.platform == 'darwin':
+        uid = os.stat('/dev/console').st_uid
+        if uid != 0:
+            return uid
+    raise ValueError('Could not identify the standard user. Install the helper from a normal ArpCut launch.')
 
 
-def macos_install_script(plist_src: str) -> str:
+def macos_daemon_plist(allowed_uid: int | None = None) -> str:
+    return launchd_plist(helper_argv(), allowed_uid=(
+        _installing_uid() if allowed_uid is None else allowed_uid))
+
+
+def macos_install_script(plist_content: str) -> str:
     """Shell script (run once as root) that installs + starts the LaunchDaemon."""
     dst = shlex.quote(DAEMON_PLIST)
-    src = shlex.quote(plist_src)
+    content = shlex.quote(plist_content)
     return (
         f'mkdir -p /Library/LaunchDaemons && '
-        f'cp {src} {dst} && chown root:wheel {dst} && chmod 644 {dst} && '
+        f'(launchctl bootout system {dst} 2>/dev/null || true) && '
+        f'rm -f {dst} && umask 022 && printf %s {content} > {dst} && '
+        f'chown root:wheel {dst} && chmod 644 {dst} && '
         f'(launchctl bootstrap system {dst} 2>/dev/null || launchctl load {dst})'
     )
+
+
+def _trusted_helper_bundle() -> tuple[bool, str]:
+    """A persistent root service must not load code its GUI user can replace."""
+    guidance = ('Persistent helpers require a packaged app in a root-managed '
+                'directory, with its bundle and parent paths owned by root and '
+                'not writable by other users or governed by extended ACLs. '
+                'Use Grant Administrator Access '
+                'for this installation.')
+    if not getattr(sys, 'frozen', False):
+        return False, guidance
+    try:
+        executable = Path(sys.executable).resolve(strict=True)
+        bundle = next((p for p in executable.parents if p.suffix == '.app'), None)
+        if bundle is None:
+            return False, guidance
+        paths = [bundle, *bundle.parents]
+        def walk_error(error):
+            raise error
+
+        for directory, dirs, files in os.walk(bundle, followlinks=False, onerror=walk_error):
+            paths.extend(Path(directory) / name for name in dirs + files)
+        for path in paths:
+            info = path.lstat()
+            if info.st_uid != 0:
+                return False, guidance
+            if _has_extended_acl(path):
+                # Mode bits alone do not rule out access granted to another
+                # local account. Persistent services conservatively reject ACLs.
+                return False, guidance
+            if path.is_symlink():
+                # Framework symlinks inside the root-owned bundle are normal;
+                # links to a checkout, venv, or other external code are not.
+                if not path.resolve(strict=True).is_relative_to(bundle):
+                    return False, guidance
+            elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                return False, guidance
+            elif info.st_mode & 0o022:
+                return False, guidance
+            elif os.geteuid() != 0 and os.access(path, os.W_OK):
+                # Also account for an ACL granting the installing user writes.
+                return False, guidance
+        return True, ''
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        return False, guidance
+
+
+def _has_extended_acl(path: Path) -> bool:
+    """Fail closed on macOS ACLs; this installer does not interpret ACL policy."""
+    if sys.platform != 'darwin':
+        return False
+    libc = ctypes.CDLL(None, use_errno=True)
+    get_acl = libc.acl_get_link_np
+    get_acl.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    get_acl.restype = ctypes.c_void_p
+    get_entry = libc.acl_get_entry
+    get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                         ctypes.POINTER(ctypes.c_void_p)]
+    get_entry.restype = ctypes.c_int
+    free_acl = libc.acl_free
+    free_acl.argtypes = [ctypes.c_void_p]
+    free_acl.restype = ctypes.c_int
+    acl = get_acl(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        return True
+    try:
+        entry = ctypes.c_void_p()
+        ctypes.set_errno(0)
+        if get_entry(acl, 0, ctypes.byref(entry)) == 0:  # ACL_FIRST_ENTRY
+            return True
+        import errno
+        return ctypes.get_errno() != errno.EINVAL  # EINVAL: empty ACL
+    finally:
+        free_acl(acl)
 
 
 def macos_uninstall_script() -> str:
@@ -128,17 +221,19 @@ def _run_admin_macos(shell_script: str) -> tuple[bool, str]:
 # -- public grant actions ----------------------------------------------------
 
 def install_helper() -> tuple[bool, str]:
-    """Install + start the persistent root helper daemon (macOS/Linux)."""
+    """Install + start the persistent root helper daemon on supported macOS apps."""
     plat = platform_name()
     if plat == 'macos':
-        with tempfile.NamedTemporaryFile('w', suffix='.plist', delete=False) as f:
-            f.write(macos_daemon_plist())
-            tmp = f.name
-        ok, msg = _run_admin_macos(macos_install_script(tmp))
+        trusted, message = _trusted_helper_bundle()
+        if not trusted:
+            return False, message
+        # Embed the reviewed plist in the authorization command. A user-owned
+        # temporary file could be replaced while the password prompt is open.
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+            plist = macos_daemon_plist()
+        except (OSError, ValueError) as exc:
+            return False, str(exc)
+        ok, msg = _run_admin_macos(macos_install_script(plist))
         return (ok, 'Background helper installed — ArpCut now has full access.') if ok else (ok, msg)
     if plat == 'linux':
         return _install_helper_linux()
@@ -180,19 +275,9 @@ def _elevate_linux() -> tuple[bool, str]:
 
 
 def _install_helper_linux() -> tuple[bool, str]:
-    """Best-effort: grant the interpreter raw-net capabilities via pkexec setcap."""
-    if not _which('pkexec') or not _which('setcap'):
-        return False, 'Install pkexec + setcap, or run: sudo arpcut'
-    target = sys.executable
-    try:
-        r = subprocess.run(
-            ['pkexec', 'setcap', 'cap_net_raw,cap_net_admin+ep', target],
-            capture_output=True, text=True)
-        return (r.returncode == 0,
-                'Network capabilities granted.' if r.returncode == 0
-                else (r.stderr.strip() or 'setcap failed.'))
-    except OSError as exc:
-        return False, str(exc)
+    """Linux has no persistent-helper installer yet; never modify Python caps."""
+    return (False, 'Background helper installation is not supported on Linux. '
+            'Use Grant Administrator Access (PolicyKit) for this session.')
 
 
 def uninstall_helper() -> tuple[bool, str]:

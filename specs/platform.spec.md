@@ -1,99 +1,58 @@
 ---
 name: platform
-description: "Cross-platform glue — interface detection, IP/MAC resolution, settings, subprocess"
+description: "Cross-platform interface detection, settings persistence, subprocess helpers"
 status: active
 paths:
   utils: src/tools/utils.py
   utils_gui: src/tools/utils_gui.py
-  qtools: src/tools/qtools.py          # PyQt5 today → PySide6 in the UI rewrite
   constants: src/constants.py
-exports:
-  - terminal
-  - threaded
-  - get_vendor
-  - good_mac
-  - get_my_ip
-  - get_gateway_ip
-  - get_gateway_mac
-  - get_ifaces
-  - get_default_iface
-  - get_iface_by_name
-  - is_connected
-  - is_admin
-  - npcap_exists
-  - get_settings
-  - set_settings
-  - import_settings
-  - export_settings
-  - repair_settings
-  - migrate_settings_file
-  - add_to_startup
-  - remove_from_startup
-  - DOCUMENTS_PATH
-  - SETTINGS_PATH
-  - SETTINGS_DEFAULTS
-  - DUMMY_ROUTER
-  - DUMMY_IFACE
-consumes: []
 verification:
-  test: "python -m pytest tests/test_platform.py -v"
-  lint: "python -m pyflakes src/tools/ src/constants.py"
+  test: "python -m pytest tests/test_platform.py tests/test_platform_regressions.py -q"
 ---
 
 # Platform Domain
 
-Handles OS differences for interface detection, IP/MAC resolution, settings, and
-subprocess. Settings are already dict-based (`SETTINGS_DEFAULTS`) and paths use
-`pathlib`; the elmocut→arpcut migration is in place (`migrate_settings_file`).
+The application stays in Python. `utils.py` provides interface discovery and
+process helpers; `utils_gui.py` provides privilege detection, Npcap detection,
+settings, and Windows autostart. GUI presentation lives in `gui/` (PySide6).
 
-## Components
+## Interface and process contracts
 
-- **`utils.py`** — `get_ifaces()` dispatches to `_get_ifaces_windows()` (parses
-  `ipconfig /all` + `netsh` GUID mapping, cross-refs scapy `NPF_{guid}`) and
-  `_get_ifaces_unix()` (route table + `get_if_hwaddr`). Plus `get_my_ip`,
-  `get_gateway_ip/mac`, `get_vendor` (manuf OUI), `good_mac`, `terminal`,
-  `threaded`, `check_connection`.
-- **`utils_gui.py`** — `is_admin`, `npcap_exists`, settings I/O, Windows autostart.
-- **`qtools.py`** — Qt helpers (`Buttons`, `MsgType`, `MsgIcon`, `msg_box`,
-  `colored_item`, `clickable`). Migrates PyQt5 → PySide6 with the UI rewrite.
-- **`constants.py`** — paths, settings schema, sentinels, Npcap constants.
+- Windows interfaces come from Scapy's structured interface list, matched by
+  GUID. `NetFace.name` is a friendly label; raw capture uses `NetFace.guid`.
+- POSIX interface discovery uses Scapy's interface and route information.
+- `is_admin()` uses Windows administrator status or POSIX effective UID.
+- `terminal()` executes argv without a shell. Malformed quoting, a nonzero
+  process exit, a missing executable, or a timeout returns `None`; diagnostic
+  stdout from a failed process is not a success result.
+- Commands have a 30-second default deadline. Callers such as ping scanning can
+  request a shorter deadline through the keyword-only `timeout` argument.
+- `threaded()` creates daemon threads and retains wrapped-function metadata.
+  Callers that must finish cleanup must join their workers explicitly.
+- Npcap installation guidance uses the official download page, not an old
+  hardcoded binary URL. Driver redistributability belongs to the build domain.
 
-## Issues to fix
+## Settings persistence
 
-1. **`is_admin()` lies on POSIX** — returns `True` unconditionally; must check
-   `os.geteuid() == 0`. Owned jointly with `privilege.spec.md` (Phase 0).
-2. **`_get_ifaces_windows()` is locale-fragile** — splits on the English literal
-   `adapter` and matches GUID substrings; breaks on non-English Windows. Prefer
-   scapy's `get_windows_if_list()` / WMI as the primary source, `ipconfig` only for
-   the friendly-name label.
-3. **`terminal()` uses `shell=True`** with f-string interpolation of values parsed
-   from OS output (ARP/ipconfig) — low practical risk but unquoted. Move to
-   arg-list `subprocess.run` (no shell) where possible; privileged commands go
-   through the helper's typed protocol, not shell.
-4. **`get_gateway_mac` (unix)** token heuristic can match IPv6/non-MAC tokens.
-5. **Hardcoded `en0`** fallbacks appear across GUI/port-blocker — replace with
-   `get_default_iface()` so non-macOS and non-`en0` setups work.
+Settings live under the platform's ArpCut configuration directory. The legacy
+elmoCut path is migrated when appropriate.
 
-## Notes
+- Keys identify values. JSON object order and unknown future keys must never
+  shift values into another setting.
+- Reads merge stored objects with independent default values. Non-object JSON is
+  invalid; startup repair recovers defaults from malformed or non-object data.
+- `export_settings()` accepts a mapping; the legacy ordered-list API remains
+  supported for compatibility.
+- Saves serialize to a private temporary file in the destination directory,
+  flush it, then atomically replace the settings file. Failed serialization or
+  replacement preserves the last valid file and removes the temporary file.
+- A re-entrant process-local lock serializes read/modify/write operations. This
+  is not a multi-process settings database; simultaneous app instances should
+  not be treated as independent writers.
 
-- The friendly `NetFace.name` vs pcap `NetFace.guid` distinction matters: scapy
-  must receive `guid` (`\Device\NPF_{...}` on Windows; `en0` on macOS where they
-  coincide). Passing `.name` to scapy fails on Windows — keep the split.
-- Rust-port notes from the old spec are removed (no Rust rewrite — see
-  `overview.spec.md`).
+## Verification
 
-## Tasks
-
-- [x] Fix `is_admin()` POSIX (honest `euid`). `PrivilegeState`/banner: still pending
-      (privilege domain).
-- [x] **De-shell**: `terminal()` and firewall `_exec` no longer use `shell=True`
-      (argv via `shlex`); the one `is_connected` shell pipe is filtered in Python;
-      `test -f` replaced by `os.path.exists`. Only `settings.py os.system('start …
-      restart.exe')` remains (legacy Windows GUI restart — Phase 4). Verified on
-      macOS (string + argv forms run correctly).
-- [x] Fix `get_gateway_mac` unix heuristic — proper MAC regex (six hex groups),
-      not "any colon token" (verified against live `arp -a`).
-- [ ] Simplify `get_ifaces()` Windows `ipconfig`/`netsh` parsing (behavior-preserving;
-      runtime-verify on Windows).
-- [ ] Replace hardcoded `en0` fallbacks with `get_default_iface()`.
-- [ ] Unit tests: settings round-trip, MAC normalization, vendor lookup.
+Tests cover existing defaults and migration-compatible serialization, reordered
+JSON fields, unknown keys, corrupt/non-object JSON, failed writes, invalid
+command quoting, nonzero process exits, and command deadlines. Tests use
+isolated temporary settings files and mocked subprocesses.

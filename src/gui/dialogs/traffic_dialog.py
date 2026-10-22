@@ -62,6 +62,7 @@ class TrafficDialog(Dialog):
 
         # Live flows arrive by push (no polling); a slow timer is a safety net.
         controller.flows_changed.connect(self._on_flows)
+        controller.states_changed.connect(self._sync_state)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
 
@@ -79,20 +80,39 @@ class TrafficDialog(Dialog):
     def _begin(self) -> None:
         capturing = self.ctrl.start_monitor(self._mac)
         if capturing:
-            self._set_status('● Capturing — routed through your Mac', 'good')
+            self._set_status('● Capturing — routed through this computer', 'good')
+            self._timer.start(2000)   # fallback; real updates come via flows_changed
         else:
-            self._set_status('● Needs administrator access to capture', 'warn')
-        self._timer.start(2000)   # fallback; real updates come via flows_changed
+            self._toggle.blockSignals(True)
+            self._toggle.setChecked(False)
+            self._toggle.blockSignals(False)
+            self._timer.stop()
+            self._set_status('● Capture could not start — check access and the status message', 'warn')
         self._refresh()
+
+    def _sync_state(self) -> None:
+        if self._mac and not self.ctrl.is_monitoring(self._mac):
+            self._toggle.blockSignals(True)
+            self._toggle.setChecked(False)
+            self._toggle.blockSignals(False)
+            self._timer.stop()
+            self._set_status('Paused', 'muted')
 
     def _end(self) -> None:
         self._timer.stop()
         if self._mac:
             self.ctrl.stop_monitor(self._mac)
-        self._set_status('Paused — device restored', 'muted')
+        if self._mac and self.ctrl.is_monitoring(self._mac):
+            self._toggle.blockSignals(True)
+            self._toggle.setChecked(True)
+            self._toggle.blockSignals(False)
+            self._timer.start(2000)
+            self._set_status('Could not stop capture — try again', 'warn')
+        else:
+            self._set_status('Paused', 'muted')
 
     def _on_flows(self, flows) -> None:
-        if self._mac and self._toggle.isChecked():
+        if self._mac and self._toggle.isChecked() and self.ctrl.is_monitoring(self._mac):
             self._render(flows)
 
     def _on_toggle(self, on: bool) -> None:
@@ -118,7 +138,7 @@ class TrafficDialog(Dialog):
             self._set(r, 1, str(f.get('port', '')), THEME.text_muted)
             self._set(r, 2, str(f.get('proto', '')), THEME.text_muted)
             self._set(r, 3, f'{_human(f.get("bytes", 0))}  ·  {f.get("packets", 0)} pkts', THEME.text_muted)
-        if not rows and self._toggle.isChecked() and self.ctrl.can_capture():
+        if not rows and self._toggle.isChecked() and self.ctrl.is_monitoring(self._mac):
             self._set_status('● Capturing — waiting for traffic…', 'good')
 
     def _set(self, row: int, col: int, text: str, color: str) -> None:
@@ -128,8 +148,10 @@ class TrafficDialog(Dialog):
             item.setTextAlignment(Qt.AlignCenter)
         self._table.setItem(row, col, item)
 
-    def closeEvent(self, event):
+    def done(self, result):
+        # Escape/reject bypass closeEvent; all ways of dismissing the dialog
+        # must stop its capture, not leave a hidden monitor routing the device.
         self._timer.stop()
         if self._mac:
             self.ctrl.stop_monitor(self._mac)
-        super().closeEvent(event)
+        super().done(result)
