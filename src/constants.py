@@ -40,7 +40,7 @@ TABLE_HEADER_LABELS: list[str] = ['IP Address', 'MAC Address', 'Vendor', 'Type',
 # ---------------------------------------------------------------------------
 # Windows-only Npcap details (ignored on macOS/Linux)
 # ---------------------------------------------------------------------------
-NPCAP_URL: str = 'https://nmap.org/npcap/dist/npcap-1.50.exe'
+NPCAP_URL: str = 'https://npcap.com/#download'
 NPCAP_PATH: str = 'C:\\Windows\\SysWOW64\\Npcap'
 
 # ---------------------------------------------------------------------------

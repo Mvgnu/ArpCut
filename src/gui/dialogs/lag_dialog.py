@@ -1,10 +1,10 @@
-"""Lag switch parameters — block/release intervals and direction."""
+"""Lag switch parameters — block/release intervals in both directions."""
 from __future__ import annotations
 
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QSpinBox
 
 from gui.dialogs.base import Dialog
-from gui.widgets.controls import SegmentedControl, label
+from gui.widgets.controls import label
 
 
 class LagDialog(Dialog):
@@ -13,17 +13,12 @@ class LagDialog(Dialog):
 
         self.content.addWidget(self.caption(
             'Cycles the connection: blocks traffic for the lag interval, then '
-            'restores it for the clear interval — repeatedly.'))
+            'restores it for the clear interval — repeatedly, in both directions.'))
 
         self._block = self._spin(1500)
         self._release = self._spin(1500)
         self.content.addLayout(self._row('Lag for (ms)', self._block))
         self.content.addLayout(self._row('Clear for (ms)', self._release))
-
-        self.content.addWidget(self.section('Direction'))
-        self._dir = SegmentedControl([('both', 'Both'), ('out', 'Outbound'), ('in', 'Inbound')])
-        self._dir.set_value('both')
-        self.content.addWidget(self._dir)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -51,4 +46,4 @@ class LagDialog(Dialog):
         return row
 
     def values(self) -> tuple[int, int, str]:
-        return self._block.value(), self._release.value(), self._dir.value()
+        return self._block.value(), self._release.value(), 'both'

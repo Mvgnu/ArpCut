@@ -13,7 +13,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-APP="${1:-$REPO_ROOT/dist/ArpCut.app}"
+VERSION="$(python3 "$REPO_ROOT/build.py" --version | awk '{print $NF}')"
+APP="${1:-$REPO_ROOT/dist/ArpCut-$VERSION.app}"
 VOL_NAME="ArpCut"
 
 if [[ ! -d "$APP" ]]; then
@@ -22,7 +23,6 @@ if [[ ! -d "$APP" ]]; then
   exit 1
 fi
 
-VERSION="$(python3 "$REPO_ROOT/build.py" --version | awk '{print $NF}')"
 OUT="$REPO_ROOT/dist/ArpCut-$VERSION.dmg"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT

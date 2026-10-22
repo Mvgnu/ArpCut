@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # Gate every release build on the test suite. The engine + WinDivert filter
   # tests run on Linux; the AF_UNIX helper-IPC suite runs here (it's skipped on
@@ -28,7 +31,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements-dev.txt
 
       - name: Run tests
         env:
@@ -65,17 +68,9 @@ jobs:
       - name: Build Windows EXE (direct launcher)
         run: python build.py
 
-      # Best-effort: bundle the Npcap driver so the installer can offer it. If the
-      # download fails, the installer still builds (the app points users at the
-      # Npcap page on first run) — see the ISPP guard in arpcut.iss.
-      - name: Download Npcap for bundling
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          New-Item -ItemType Directory -Force packaging/windows/vendor | Out-Null
-          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.79.exe" `
-            -OutFile packaging/windows/vendor/npcap.exe
-
+      # Public Npcap installers cannot be redistributed or silently installed.
+      # Release builds direct users to the official download page. A separately
+      # licensed OEM package can be explicitly bundled in a local installer build.
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
@@ -92,6 +87,7 @@ jobs:
           path: |
             dist/ArpCut-${{ steps.ver.outputs.version }}.exe
             dist/ArpCut-${{ steps.ver.outputs.version }}-Setup.exe
+          if-no-files-found: error
 
   build-macos:
     needs: test
@@ -121,11 +117,17 @@ jobs:
         run: |
           cd dist && zip -r "ArpCut-macOS.zip" "ArpCut-${{ steps.ver.outputs.version }}.app"
 
+      - name: Create DMG
+        run: python build.py --dmg
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: ArpCut-macOS
-          path: dist/ArpCut-macOS.zip
+          path: |
+            dist/ArpCut-macOS.zip
+            dist/ArpCut-${{ steps.ver.outputs.version }}.dmg
+          if-no-files-found: error
 
   build-linux:
     needs: test
@@ -161,6 +163,7 @@ jobs:
         with:
           name: ArpCut-Linux
           path: dist/ArpCut-${{ steps.ver.outputs.version }}
+          if-no-files-found: error
 
   release:
     needs: [build-windows, build-macos, build-linux]

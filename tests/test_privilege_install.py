@@ -39,15 +39,17 @@ def test_entry_argv_points_at_launcher():
 
 
 def test_macos_daemon_plist_has_label_and_bootstrap():
-    plist = install.macos_daemon_plist()
+    plist = install.macos_daemon_plist(allowed_uid=501)
     assert HELPER_LABEL in plist
     assert 'RunAtLoad' in plist and 'KeepAlive' in plist
     assert 'privilege.helper' in plist  # the -c bootstrap is embedded as an arg
 
 
 def test_macos_install_script_installs_and_starts():
-    sc = install.macos_install_script('/tmp/arpcut.plist')
-    assert '/tmp/arpcut.plist' in sc
+    plist = install.macos_daemon_plist(allowed_uid=501)
+    sc = install.macos_install_script(plist)
+    assert 'printf %s' in sc
+    assert 'ProgramArguments' in sc
     assert install.DAEMON_PLIST in sc
     assert 'chown root:wheel' in sc and 'chmod 644' in sc
     assert 'launchctl bootstrap system' in sc or 'launchctl load' in sc

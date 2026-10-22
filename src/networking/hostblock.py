@@ -20,9 +20,10 @@ is unit-testable without touching the real system firewall or the network.
 from __future__ import annotations
 
 import logging
-import random
+import secrets
 import socket
 import struct
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional, Union
 
@@ -88,37 +89,63 @@ def _looks_like_ipv4(value: str) -> bool:
 
 def _dns_a_query(domain: str, server: str, timeout: float = 3.0) -> set[str]:
     """Raw UDP DNS A-record query to a specific resolver (no root needed)."""
-    tid = random.randint(0, 0xffff)
+    labels = domain.rstrip('.').encode('idna').split(b'.')
+    if not labels or any(not label or len(label) > 63 for label in labels):
+        raise ValueError('Invalid DNS name')
+    question = b''.join(bytes([len(label)]) + label for label in labels) + b'\x00'
+    if len(question) > 255:
+        raise ValueError('DNS name too long')
+    question += struct.pack('>HH', 1, 1)  # QTYPE=A, QCLASS=IN
+    tid = secrets.randbits(16)
     pkt = struct.pack('>HHHHHH', tid, 0x0100, 1, 0, 0, 0)
-    pkt += b''.join(bytes([len(p)]) + p.encode() for p in domain.split('.')) + b'\x00'
-    pkt += struct.pack('>HH', 1, 1)  # QTYPE=A, QCLASS=IN
+    pkt += question
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(timeout)
     try:
         s.sendto(pkt, (server, 53))
-        data, _ = s.recvfrom(4096)
+        data, sender = s.recvfrom(4096)
     finally:
         s.close()
-    qd, an = struct.unpack('>H', data[4:6])[0], struct.unpack('>H', data[6:8])[0]
+    if sender != (server, 53):
+        return set()
+    return _parse_dns_a_response(data, tid, question)
+
+
+def _parse_dns_a_response(data: bytes, tid: int, question: bytes) -> set[str]:
+    """Reject mismatched/truncated DNS datagrams before consuming answers."""
+    if len(data) < 12:
+        raise ValueError('Truncated DNS header')
+    got_tid, flags, qd, an, _, _ = struct.unpack('>HHHHHH', data[:12])
+    if (got_tid != tid or not flags & 0x8000 or flags & 0x7a0f
+            or qd != 1 or data[12:12 + len(question)] != question):
+        return set()
 
     def skip_name(o: int) -> int:
         while True:
+            if o >= len(data):
+                raise ValueError('Truncated DNS name')
             length = data[o]
             if length == 0:
                 return o + 1
             if length & 0xc0 == 0xc0:   # compression pointer
+                if o + 1 >= len(data) or ((length & 0x3f) << 8 | data[o + 1]) >= len(data):
+                    raise ValueError('Invalid DNS compression pointer')
                 return o + 2
+            if length > 63 or o + 1 + length >= len(data):
+                raise ValueError('Invalid DNS label')
             o += 1 + length
 
-    off = 12
-    for _ in range(qd):
-        off = skip_name(off) + 4
+    off = 12 + len(question)
     ips: set[str] = set()
     for _ in range(an):
         off = skip_name(off)
+        if off + 10 > len(data):
+            raise ValueError('Truncated DNS answer')
         rtype, _rclass, _ttl, rdlen = struct.unpack('>HHIH', data[off:off + 10])
         off += 10
-        if rtype == 1 and rdlen == 4:
+        if off + rdlen > len(data):
+            raise ValueError('Truncated DNS data')
+        if rtype == 1 and _rclass == 1 and rdlen == 4:
             ips.add('.'.join(str(b) for b in data[off:off + 4]))
         off += rdlen
     return ips
@@ -134,7 +161,7 @@ def resolve_ipv4(domain: str) -> set[str]:
     try:
         for info in socket.getaddrinfo(domain, None, socket.AF_INET):
             ips.add(info[4][0])
-    except (socket.gaierror, OSError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         log.debug('system resolver could not resolve %s: %s', domain, exc)
     if ips:
         return ips
@@ -144,7 +171,7 @@ def resolve_ipv4(domain: str) -> set[str]:
             if got:
                 log.info('resolved %s via %s (system resolver had nothing)', domain, server)
                 return got
-        except OSError as exc:
+        except (OSError, ValueError, struct.error) as exc:
             log.debug('public DNS %s failed for %s: %s', server, domain, exc)
     log.warning('Could not resolve %s (no A record anywhere?)', domain)
     return ips
@@ -200,6 +227,7 @@ class HostBlocklist:
         self._resolve = resolver
         self._direction = direction
         self._blocks: dict[str, _ActiveBlock] = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def _target_parts(target: PresetOrTarget) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
@@ -229,55 +257,81 @@ class HostBlocklist:
         """Block any of ``target``'s IPs not already blocked under its key."""
         key, domains, static_ips = self._target_parts(target)
         desired = self._desired(domains, static_ips)
-        record = self._blocks.setdefault(
-            key, _ActiveBlock(domains=domains, static_ips=static_ips))
-        record.domains, record.static_ips = domains, static_ips
+        with self._lock:
+            record = self._blocks.setdefault(
+                key, _ActiveBlock(domains=domains, static_ips=static_ips))
+            record.domains, record.static_ips = domains, static_ips
 
-        result = BlockResult(key=key, desired=desired)
-        for ip in desired - record.ips:
-            if self._block_ip(iface, ip, self._direction):
-                record.ips.add(ip)
-                result.added.add(ip)
-            else:
-                result.failed.add(ip)
-        if not record.ips:
-            self._blocks.pop(key, None)
-        return result
-
-    def unblock(self, key: str) -> bool:
-        """Remove exactly the IPs blocked under ``key``."""
-        record = self._blocks.pop(key, None)
-        if not record:
-            return True  # unblocking something not blocked is a no-op success
-        ok = True
-        for ip in record.ips:
-            ok = self._unblock_ip(ip) and ok
-        return ok
-
-    def refresh(self, iface: str) -> dict[str, BlockResult]:
-        """Re-resolve every active key and reconcile rules to the new IP set."""
-        results: dict[str, BlockResult] = {}
-        for key, record in list(self._blocks.items()):
-            desired = self._desired(record.domains, record.static_ips)
             result = BlockResult(key=key, desired=desired)
-            for ip in record.ips - desired:               # stale → remove
-                if self._unblock_ip(ip):
-                    record.ips.discard(ip)
-                    result.removed.add(ip)
-            for ip in desired - record.ips:               # new → add
-                if self._block_ip(iface, ip, self._direction):
+            for ip in desired - record.ips:
+                if self._shared(ip, key) or self._block_ip(iface, ip, self._direction):
                     record.ips.add(ip)
                     result.added.add(ip)
                 else:
                     result.failed.add(ip)
             if not record.ips:
                 self._blocks.pop(key, None)
-            results[key] = result
+        return result
+
+    def _shared(self, ip: str, key: str) -> bool:
+        """Whether another active key still owns the same firewall rule."""
+        return any(ip in rec.ips for name, rec in self._blocks.items() if name != key)
+
+    def unblock(self, key: str) -> bool:
+        """Remove exactly the IPs blocked under ``key``."""
+        with self._lock:
+            record = self._blocks.get(key)
+            if not record:
+                return True  # unblocking something not blocked is a no-op success
+            for ip in set(record.ips):
+                if self._shared(ip, key) or self._unblock_ip(ip):
+                    record.ips.discard(ip)
+            if record.ips:
+                return False  # retain failed deletions so a later cleanup can retry
+            self._blocks.pop(key, None)
+            return True
+
+    def clear(self) -> bool:
+        """Remove all owned rules, retaining any failed deletion for retry."""
+        with self._lock:
+            ok = True
+            for key in list(self._blocks):
+                ok = self.unblock(key) and ok
+            return ok
+
+    def refresh(self, iface: str) -> dict[str, BlockResult]:
+        """Re-resolve every active key and reconcile rules to the new IP set."""
+        results: dict[str, BlockResult] = {}
+        with self._lock:
+            for key, record in list(self._blocks.items()):
+                desired = self._desired(record.domains, record.static_ips)
+                result = BlockResult(key=key, desired=desired)
+                # A transient DNS failure must not forget rules we still own.
+                if not desired:
+                    results[key] = result
+                    continue
+                for ip in record.ips - desired:               # stale → remove
+                    if self._shared(ip, key) or self._unblock_ip(ip):
+                        record.ips.discard(ip)
+                        result.removed.add(ip)
+                    else:
+                        result.failed.add(ip)
+                for ip in desired - record.ips:               # new → add
+                    if self._shared(ip, key) or self._block_ip(iface, ip, self._direction):
+                        record.ips.add(ip)
+                        result.added.add(ip)
+                    else:
+                        result.failed.add(ip)
+                if not record.ips:
+                    self._blocks.pop(key, None)
+                results[key] = result
         return results
 
     def active(self) -> dict[str, set[str]]:
         """Map of key → currently-blocked IPs."""
-        return {key: set(rec.ips) for key, rec in self._blocks.items()}
+        with self._lock:
+            return {key: set(rec.ips) for key, rec in self._blocks.items()}
 
     def is_active(self, key: str) -> bool:
-        return bool(self._blocks.get(key))
+        with self._lock:
+            return bool(self._blocks.get(key))

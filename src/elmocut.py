@@ -26,13 +26,14 @@ def _require_npcap() -> None:
 def _flush_firewall() -> int:
     """Remove every ArpCut firewall rule. Called by the uninstaller (all OSes)."""
     from tools import firewall
-    for ip, _ in firewall.list_blocked_ips():
-        firewall.unblock_ip(ip)
-    for port, proto, _ in firewall.list_blocked_ports():
-        firewall.unblock_port(port, proto)
-    firewall.clear_all_port_blocks()
-    firewall.clear_anchor()
-    return 0
+    try:
+        if firewall.clear_all_rules():
+            return 0
+        detail = firewall.last_error() or 'some ArpCut rules could not be removed'
+    except Exception as exc:
+        detail = str(exc)
+    print(f'Firewall cleanup failed: {detail}', file=sys.stderr)
+    return 1
 
 
 if __name__ == '__main__':

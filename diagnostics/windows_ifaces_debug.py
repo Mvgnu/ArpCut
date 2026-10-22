@@ -6,7 +6,7 @@ Analyzes the three-layer naming problem: Scapy name, Windows GUID, Friendly name
 import sys
 import os
 import re
-sys.path.append(os.path.join(os.getcwd(), 'src'))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
 def section(title):
     print(f"\n{'='*60}")

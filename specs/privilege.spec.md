@@ -30,6 +30,39 @@ consumes:
 
 # Privilege Domain
 
+## Audit hardening (2026-10-22)
+
+- The daemon socket is private (`0600`) to the installing user, and the helper
+  verifies the peer UID before serving requests. The LaunchDaemon records that
+  UID explicitly; manual `sudo` launches use `SUDO_UID`, with the macOS console
+  user as a fallback. If no user is identified, access remains root-only.
+- Exactly one subscribed GUI session owns privileged state. Mutating operations,
+  scans, and captures require that session. Read-only health/status probes remain
+  available without subscribing. Requests and disconnect cleanup are serialized;
+  a second session cannot inherit or clear a live session's rules.
+- Persistent sessions have no idle read timeout. Explicit close shuts down the
+  socket to wake both readers, and a request timeout invalidates the connection
+  so a late reply cannot be mistaken for the next request's response. Scans have
+  a 300-second deadline (2–255 addresses, 1–64 workers); host resolution and
+  cleanup use explicit 60/120-second deadlines. Health probes stay responsive
+  during long operations.
+- JSON frames and argument types are checked before dispatch, including subscribe.
+  Frames are bounded to 1 MiB. Cleanup attempts every stage and reports failures;
+  switching interfaces first restores the old interface's state. SIGTERM runs
+  orderly helper cleanup; hard termination/power loss still needs a later cleanup
+  run. The engine also rejects device-control actions against protected gateway
+  and local-host records, independently of the GUI.
+- Persistent macOS installation requires a frozen application bundle whose files
+  and parent paths are root-owned and not group/world-writable, with no extended
+  ACLs or links outside the bundle. Source checkouts
+  use one-time elevation; the installer never persists a user-writable Python
+  interpreter or checkout as a root service. Generated plist content is embedded
+  in the authorized install command, avoiding a temporary-plist replacement race.
+- Linux uses one-time PolicyKit elevation. Persistent-helper installation is not
+  implemented, and must never grant capabilities to a shared Python interpreter.
+- `set_forwarding(False)` explicitly reports that restoration is unsupported;
+  the previous global forwarding state is not yet tracked.
+
 ArpCut cannot function without root on macOS/Linux (raw/BPF sockets, `pfctl`/`nft`,
 `sysctl` forwarding all require it), and a double-clicked GUI runs as the user. The
 fix — the same one Wireshark/Little Snitch use — is **privilege separation**: a
@@ -52,10 +85,10 @@ small root **helper daemon** does the privileged work; the GUI is an unprivilege
   JSON-friendly data; scapy imported lazily) and `HelperServer`. `handle(req)` is a
   pure validate-then-dispatch function (unit-tested with a mock engine);
   `serve_connection` / `serve_forever` run the Unix-socket loop. `main()` refuses to
-  start unless `euid == 0`, binds `SOCKET_PATH`, chmods it `0666` so the GUI user can
-  connect, and serves.
-- **`client.py`** — `HelperClient.call(cmd, **args) -> Response` over the Unix
-  socket; `available()` pings the helper. `connect` is injectable (tests wire a
+  start unless `euid == 0`, binds `SOCKET_PATH` privately (`0600`, installing-user
+  ownership), verifies peer credentials, and serves.
+- **`client.py`** — `HelperClient.call(cmd, **args) -> Response` for read-only
+  probes over the Unix socket; `available()` pings the helper. `connect` is injectable (tests wire a
   `socketpair` for a real client↔server loopback). No scapy, no privilege — safe to
   import from the GUI.
 - **`remote.py`** — `RemoteEngine`: the unprivileged GUI's view of the engine,
@@ -77,9 +110,9 @@ GUI holding no privilege.
 The remote backend holds **one persistent connection** (`HelperSession`), not a
 call-per-connection. This buys two things that prevent real user pain:
 
-- **No orphaned blocks.** The session is `subscribe`d; when it drops — GUI quit
+- **Disconnect cleanup.** The session is `subscribe`d; when it drops — GUI quit
   *or* crash — the helper runs `Engine.cleanup()` (unkill all + clear every
-  firewall rule), so a device is never left cut after the app is gone. The GUI
+  firewall rule), reporting/logging failures that need a retry. The GUI
   also calls `cleanup()` on start (clears hard-crash leftovers) and on clean
   shutdown. Non-session (one-shot) connections never trigger cleanup.
 - **Push, not poll.** The root-side sniffer's per-packet callback pushes throttled
@@ -113,9 +146,10 @@ Building the helper is **not** blocked by signing; only shipping it double-click
 
 - **Windows**: elevate the whole process via the existing UAC manifest; bundle Npcap
   in the installer. No separate helper daemon for v1 (`SOCKET_PATH` is empty).
-- **Linux**: `setcap cap_net_raw,cap_net_admin+ep` on the binary, or a polkit action;
-  the same helper protocol works over `/run/com.arpcut.helper.sock` if a daemon is
-  preferred.
+- **Linux**: session elevation through PolicyKit; there is no persistent-helper
+  installer. Never grant capabilities to the shared Python interpreter. The same
+  helper protocol supports manually managed daemons over
+  `/run/com.arpcut.helper.sock`, with an explicitly authorized user.
 
 ## Remaining
 
@@ -126,4 +160,4 @@ Building the helper is **not** blocked by signing; only shipping it double-click
 - [ ] Push device-list / state snapshots too (scan still blocks in a worker;
       cut/one-way state is still controller-mirrored, accurate within a session).
 - [ ] SMAppService registration code + `.app` bundling (deploy).
-- [ ] Tighten socket perms (chown to the console user vs `0666`).
+- [x] Private socket permissions, peer UID verification, and exclusive session ownership.

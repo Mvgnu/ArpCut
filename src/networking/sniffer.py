@@ -2,7 +2,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime
-from threading import Thread, Event
+from threading import Thread, Event, RLock, current_thread
 from time import time
 import sys
 from typing import Optional, Callable, Any
@@ -20,6 +20,7 @@ class TrafficSniffer:
     def __init__(self) -> None:
         self._thread = None
         self._stop = Event()
+        self._lock = RLock()
         self._flows = defaultdict(lambda: {
             'bytes': 0,
             'packets': 0,
@@ -37,7 +38,8 @@ class TrafficSniffer:
         self._last_pkt: object = None
 
     def get_flows(self) -> dict[tuple[str, int, str], dict[str, Any]]:
-        return dict(self._flows)
+        with self._lock:
+            return {key: dict(value) for key, value in self._flows.items()}
 
     def get_last_packet_hex(self) -> str:
         if self._last_pkt is None:
@@ -85,40 +87,70 @@ class TrafficSniffer:
         return info
 
     def get_patterns(self) -> dict[tuple[str, int, int], dict[str, int]]:
-        return dict(self._patterns)
+        with self._lock:
+            return {key: dict(value) for key, value in self._patterns.items()}
 
-    def start(self, victim_ip: str, iface: str, on_update: Optional[Callable[[], None]] = None) -> None:
+    def start(self, victim_ip: str, iface: str, on_update: Optional[Callable[[], None]] = None) -> bool:
         self.stop()
-        self._victim_ip = victim_ip
-        self._iface = iface
-        self._callback = on_update
-        self._stop.clear()
-        self._thread = Thread(target=self._run, daemon=True)
+        with self._lock:
+            self._victim_ip = victim_ip
+            self._iface = iface
+            self._callback = on_update
+            self._flows.clear()
+            self._patterns.clear()
+            self._pattern_samples.clear()
+            self._last_pkt = None
+        # Never reuse a cancellation event: a stopped worker must stay stopped.
+        self._stop = Event()
+        ready = Event()
+        startup = {'error': None}
+        self._thread = Thread(target=self._run,
+                              args=(self._stop, victim_ip, iface, ready, startup), daemon=True)
         self._thread.start()
+        if not ready.wait(2.0):
+            self.stop()
+            raise RuntimeError('Traffic capture did not start in time')
+        if startup['error']:
+            self.stop()
+            raise RuntimeError(startup['error'])
+        return True
 
     def stop(self) -> None:
+        self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._stop.set()
-            self._thread.join(timeout=1.0)
+            if self._thread is current_thread():
+                return
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                raise RuntimeError('Traffic capture has not stopped yet')
         self._thread = None
 
-    def _run(self) -> None:
+    def _run(self, stop: Event, victim_ip: str, iface: str,
+             ready: Event, startup: dict) -> None:
         if sniff is None:
+            startup['error'] = 'Scapy is unavailable for traffic capture'
+            ready.set()
             return
         # BPF filter: traffic to/from victim
-        bpf = f"host {self._victim_ip}"
+        bpf = f"host {victim_ip}"
         try:
-            sniff(prn=self._process,
-                  filter=bpf,
-                  store=False,
-                  iface=self._iface,
-                  stop_filter=lambda p: self._stop.is_set())
-        except PermissionError:
-            log.info('Non-root: traffic sniffing unavailable on %s', self._iface)
+            # stop_filter only runs when a packet arrives. A bounded capture
+            # timeout also releases idle captures, allowing stop/join to finish.
+            while not stop.is_set():
+                sniff(prn=lambda pkt: None if stop.is_set() else self._process(pkt),
+                      filter=bpf, store=False, iface=iface, timeout=0.5,
+                      stop_filter=lambda p: stop.is_set(), started_callback=ready.set)
         except Exception as e:  # scapy wraps BPF-open denial in Scapy_Exception, not OSError
+            startup['error'] = str(e) or type(e).__name__
             log.warning('Sniffer stopped on %s: %s', self._iface, e)
+        finally:
+            ready.set()
 
     def _process(self, pkt: object) -> None:
+        with self._lock:
+            self._process_locked(pkt)
+
+    def _process_locked(self, pkt: object) -> None:
         now = time()
         if IP not in pkt:
             return
@@ -173,6 +205,7 @@ class TrafficSniffer:
                 log.debug('Sniffer callback error: %s', e)
 
     def get_pattern_samples(self, key: tuple[str, int, int]) -> list[dict[str, Any]]:
-        return list(self._pattern_samples.get(key, []))
+        with self._lock:
+            return [dict(sample) for sample in self._pattern_samples.get(key, [])]
 
 

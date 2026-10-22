@@ -1,18 +1,18 @@
 """Blocker — everything you can block for the selected device, plus presets.
 
-Device-scoped by design: you open it on a device and configure blocks *for that
-device*. Three mechanisms:
+Open it on a device to configure DNS and port blocks. Destination-IP rules are
+shared by all routed devices. Three mechanisms:
 
 * **DNS name** (interception) — while the device is MITM'd, its lookup of the name
   is answered with NXDOMAIN. Works even for names with **no IP** (e.g. PSN comms);
   this is the general form of the PSN preset.
 * **Port** — drops a port for the device (WinDivert on Windows / pf/nft elsewhere).
-* **Destination IP / domain** — a domain is killed by DNS interception (NXDOMAIN)
+* **Destination IP / domain** — a domain is blocked by DNS interception (NXDOMAIN)
   so it can't resolve, with its current IPs dropped as a backstop; a raw IP is
-  dropped directly. Scoped to the routed device you're configuring.
+  dropped directly. These IP rules apply to every routed device.
 
-Everything here is device-scoped: you open it on a device and it auto-routes that
-device through us so the blocks apply. All driven through the Controller.
+The selected device is automatically routed so the blocks apply. All driven
+through the Controller.
 """
 from __future__ import annotations
 
@@ -87,12 +87,11 @@ class BlockerDialog(Dialog):
         self.content.addWidget(hline())
 
         # --- block a destination (for the configured device) ---
-        self.content.addWidget(self.section('Block a destination IP or domain  ·  this device'))
+        self.content.addWidget(self.section('Block a destination IP or domain'))
         self.content.addWidget(self.caption(
-            "Blocks this device's traffic to an address. A domain is killed by DNS "
-            "(NXDOMAIN) so it can't even resolve — the reliable way, since sites "
-            'rotate across many IPs; its current IPs are dropped too. A raw IP is '
-            'dropped directly. Auto-routes the device through this PC.'))
+            'DNS blocking applies to this device. Destination-IP rules, including '
+            "a domain's current IPs, apply to every device routed through this PC. "
+            'The selected device is routed automatically.'))
         hrow = QHBoxLayout()
         self._host_edit = QLineEdit()
         self._host_edit.setPlaceholderText('e.g. 8.8.8.8  or  matchmaking.example.com')
@@ -162,8 +161,11 @@ class BlockerDialog(Dialog):
             if not self._require_target('toggle a DNS preset'):
                 self._preset_toggles[preset.key].setChecked(False)
                 return
-            self.ctrl.dns_block(self._target['mac'], preset.domains) if on \
-                else self.ctrl.dns_unblock(self._target['mac'])
+            if on:
+                self.ctrl.dns_block(self._target['mac'], preset.domains)
+            else:
+                for name in preset.domains:
+                    self.ctrl.dns_unblock_name(self._target['mac'], name)
         else:
             tmac = self._target['mac'] if self._target else None
             self.ctrl.block_host(preset.key, tmac) if on else self.ctrl.unblock_host(preset.key)
@@ -220,9 +222,13 @@ class BlockerDialog(Dialog):
         # Preset toggles reflect fast in-memory state — update them immediately.
         active_hosts = self.ctrl.active_host_blocks()
         target_mac = self._target['mac'] if self._target else None
+        target_ip = self._target['ip'] if self._target else None
+        dns_names = {name.lower().rstrip('.') for name in
+                     self.ctrl.active_dns_blocks().get(target_ip, [])}
         for key, toggle in self._preset_toggles.items():
             preset = self._presets[key]
-            checked = (bool(target_mac and self.ctrl.is_dns_blocked(target_mac))
+            checked = (bool(target_mac and preset.domains)
+                       and all(name.lower().rstrip('.') in dns_names for name in preset.domains)
                        if preset.method == 'dns' else key in active_hosts)
             toggle.blockSignals(True)
             toggle.setChecked(checked)

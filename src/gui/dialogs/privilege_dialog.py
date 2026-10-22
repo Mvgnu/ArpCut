@@ -60,7 +60,7 @@ class PrivilegeDialog(Dialog):
         self._grant_hint = self.caption('')
         self.content.addWidget(self._grant_hint)
 
-        # advanced: persistent helper (macOS/Linux)
+        # advanced: persistent helper (macOS only)
         self._helper_box = QWidget()
         hb = QVBoxLayout(self._helper_box)
         hb.setContentsMargins(0, 0, 0, 0)
@@ -107,7 +107,9 @@ class PrivilegeDialog(Dialog):
             self._grant_hint.setText('You\'ll see the macOS password prompt, then ArpCut reopens with access.')
         self._grant_hint.setVisible(not ok)
         # helper option only where a daemon applies
-        self._helper_box.setVisible(plat in ('macos', 'linux') and not st['helper_running'])
+        self._helper_box.setVisible(plat == 'macos'
+                                    and st.get('helper_supported', True)
+                                    and not st['helper_running'])
         self._helper_btn.setText('  Reinstall Background Helper' if st['helper_installed']
                                  else '  Install Background Helper')
 

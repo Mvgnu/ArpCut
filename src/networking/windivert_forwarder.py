@@ -327,16 +327,28 @@ class WinDivertForwarder:
         subset reaches here; the allowed traffic never leaves the kernel.
         """
         handle = self._handle
-        while self.running and handle is not None:
-            try:
-                handle.recv()  # matched == to-drop; we simply never send() it
-            except Exception as e:  # noqa: BLE001 - handle closed / shutdown races
-                if self.running:
-                    log.debug('WinDivert recv ended: %s', e)
-                break
-            with self._lock:
-                self._pkt_count += 1
-                self._drop_count += 1
+        try:
+            while self.running and handle is not None:
+                try:
+                    handle.recv()  # matched == to-drop; we simply never send() it
+                except Exception as e:  # noqa: BLE001 - handle closed / shutdown races
+                    if self.running:
+                        log.debug('WinDivert recv ended: %s', e)
+                    break
+                with self._lock:
+                    self._pkt_count += 1
+                    self._drop_count += 1
+        finally:
+            # A failed receive must not leave a live interception handle with no
+            # reader, or report a running policy that died in the worker.
+            if self._handle is handle:
+                self._handle = None
+                self.running = False
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def stop(self) -> None:
         """Stop dropping and close the handle (traffic returns to normal)."""

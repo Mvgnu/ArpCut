@@ -7,8 +7,8 @@ in-app privilege flow (`Set Up Access`) handles elevation on first run.
 | OS | Artifact | Driver | Privilege on first run |
 |----|----------|--------|------------------------|
 | macOS | `ArpCut-<ver>.dmg` (drag → Applications) | libpcap (built in) | native password prompt → relaunch as admin, **or** install background helper |
-| Windows | `ArpCut-<ver>-Setup.exe` (Inno Setup) | **Npcap** bundled + silent-installed | UAC (installer + app manifest) |
-| Linux | AppImage / `.deb` | libpcap | PolicyKit (`pkexec`) or `setcap` |
+| Windows | `ArpCut-<ver>-Setup.exe` (Inno Setup) | **Npcap** installed separately by default | UAC (installer + app manifest) |
+| Linux | `ArpCut-<ver>` standalone binary | libpcap | PolicyKit (`pkexec`) |
 
 The build itself is `python build.py` (PyInstaller). Packaging wraps its output.
 
@@ -30,7 +30,11 @@ compressed UDZO image — the familiar "drag to Applications" installer.
 - **Grant Administrator Access** → one macOS password prompt, ArpCut relaunches with
   root (works immediately, unsigned).
 - **Install Background Helper** → installs `com.arpcut.helper` as a LaunchDaemon
-  (root), the Wireshark/Little-Snitch model, so it just works every launch.
+  (root). This requires a packaged `.app` whose bundle and parent directories are
+  root-owned and not writable by other users. Source checkouts and user-writable
+  app bundles are rejected; use administrator relaunch for development. The
+  daemon authorizes the installing user's UID and accepts one controlling GUI
+  session at a time.
 
 **Signing / notarization (optional, for zero Gatekeeper friction).** Requires an
 Apple Developer ID. The Hardened Runtime does **not** block BPF.
@@ -50,37 +54,45 @@ The signed release should bundle a `arpcut-helper` executable and register it vi
 
 ```bat
 python build.py                                  :: → dist\ArpCut-<ver>.exe
-:: put the Npcap installer here first (https://npcap.com):
-::   packaging\windows\vendor\npcap.exe
 iscc /DMyAppVersion=<ver> packaging\windows\arpcut.iss   :: → dist\ArpCut-<ver>-Setup.exe
 ```
 
 `arpcut.iss` (Inno Setup 6):
 - installs to Program Files, creates Start-menu / optional desktop shortcuts,
-- **silently installs Npcap** (`/S /winpcap_mode=yes`) only if the `npcap` service
-  is absent,
+- leaves Npcap installation to the user by default, through the
+  [official download page](https://npcap.com/#download),
 - requests admin (`PrivilegesRequired=admin`; the app exe also carries a
   `--uac-admin` manifest from `build.py`),
 - on uninstall runs `ArpCut.exe --flush-firewall` to remove leftover `arpcut_*`
   rules.
+
+Npcap's public installer cannot be redistributed, and its `/S` silent-install
+option is available only with OEM. See the
+[Npcap OEM documentation](https://npcap.com/oem/) and
+[installer options](https://npcap.com/guide/npcap-users-guide.html).
+CI therefore does not download or bundle a public Npcap installer. If you hold an
+OEM redistribution license, provide `packaging/windows/vendor/npcap-oem.exe` and
+compile with `/DBundleNpcapOEM`; this explicitly enables the optional silent
+installation when the `npcap` service is absent. Vendor installers are not tracked
+in Git.
 
 Code-sign `ArpCut.exe` and the Setup with an EV/OV cert to avoid SmartScreen/AV
 false positives (network tools trip them — keep VirusTotal links in the README).
 
 ---
 
-## Linux — AppImage / `.deb`
+## Linux — standalone binary
 
-Build the binary with `python build.py` (→ `dist/ArpCut`). Ship it as an AppImage
-(via `linuxdeploy`) or a `.deb`. Install `packaging/linux/arpcut.desktop` and an
-`arpcut` icon into the standard paths.
+Build the binary with `python build.py` (→ `dist/ArpCut-<ver>`). AppImage and `.deb`
+targets remain unimplemented. A future package can install
+`packaging/linux/arpcut.desktop` and an `arpcut` icon into the standard paths.
 
 **Privilege.** First launch → **Set Up Access**:
-- **Grant Administrator Access** → `pkexec` relaunch, or
-- **Install Background Helper** → `pkexec setcap cap_net_raw,cap_net_admin+ep` on the
-  interpreter/binary.
-
-A `.deb` may run the `setcap` step in `postinst`.
+- **Grant Administrator Access** → `pkexec` relaunch.
+- Persistent helper installation is unavailable on Linux. Capabilities on a
+  Python interpreter authorize unrelated scripts and are not a supported setup
+  path. The app also needs privileged firewall/forwarding commands beyond raw
+  socket access.
 
 ---
 

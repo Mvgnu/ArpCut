@@ -7,7 +7,7 @@ HelperServer + dispatch table.
 """
 import os
 import socket
-import tempfile
+import sys
 import threading
 import time
 
@@ -17,8 +17,8 @@ import pytest
 # separation). Windows uses UAC elevation instead and has no AF_UNIX, so the
 # whole loopback-IPC suite is skipped there rather than failing collection.
 pytestmark = pytest.mark.skipif(
-    not hasattr(socket, 'AF_UNIX'),
-    reason='helper IPC uses AF_UNIX (POSIX-only); Windows elevates via UAC',
+    sys.platform != 'darwin' and not sys.platform.startswith('linux'),
+    reason='helper peer credentials use Linux/macOS Unix sockets; Windows uses UAC',
 )
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from privilege.helper import HelperServer  # noqa: E402
-from privilege.client import HelperClient  # noqa: E402
+from privilege.client import HelperSession  # noqa: E402
 from privilege.remote import RemoteEngine  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
@@ -48,12 +48,14 @@ class MockEngine:
     def __init__(self):
         self.calls = []
         self.on_flows = None       # wired by the server on 'subscribe'
+        self.cleaned = threading.Event()
 
     def _rec(self, name, *a):
         self.calls.append((name, *a))
         return True
 
     def cleanup(self):
+        self.cleaned.set()
         return self._rec('cleanup')
 
     def status(self):
@@ -166,20 +168,39 @@ class MockEngine:
 class _Server:
     """A real AF_UNIX HelperServer in a thread — the actual wire path."""
 
+    instances = []
+
     def __init__(self, engine):
         self.engine = engine
-        self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, 's.sock')
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(self.path)
-        self.sock.listen(5)
-        threading.Thread(target=HelperServer(engine).serve_forever,
-                         args=(self.sock,), daemon=True).start()
+        self.server = HelperServer(engine)
+        self.clients = []
+        self.threads = []
+        self.instances.append(self)
 
     def remote(self):
-        r = RemoteEngine(sock_path=self.path)
+        a, b = socket.socketpair()
+        thread = threading.Thread(target=self.server._serve_and_close, args=(b,), daemon=True)
+        self.threads.append(thread)
+        thread.start()
+        r = RemoteEngine(session=HelperSession(connect=lambda: a))
+        self.clients.append(r)
         assert r.available()   # connects + subscribes over the real socket
         return r
+
+    def close(self):
+        for remote in self.clients:
+            remote.close()
+        for thread in self.threads:
+            thread.join(2)
+            assert not thread.is_alive(), 'helper socket thread did not stop'
+
+
+@pytest.fixture(autouse=True)
+def close_test_servers():
+    yield
+    for server in _Server.instances:
+        server.close()
+    _Server.instances.clear()
 
 
 # ---- RemoteEngine ↔ HelperServer over a real socket ------------------------
@@ -245,24 +266,12 @@ def test_flows_are_pushed_over_the_session():
     assert received and received[0][0]['dst'] == '1.1.1.1'  # arrived by push, no poll
 
 
-# Known-fragile on Linux CI: the cleanup-on-disconnect fires in the helper's
-# per-connection thread, and observing it here is a wall-clock race that starves
-# under CI contention (accumulated daemon server threads from earlier tests on a
-# 2-core runner). The product path is correct (see helper.serve_connection's
-# finally block); this is a test-synchronization limitation, so it is marked
-# non-strict xfail — still run and reported, but never blocks the release gate.
-# Tracked to be rewritten with a deterministic disconnect barrier.
-@pytest.mark.xfail(reason='cleanup-on-disconnect observation races on Linux CI',
-                   strict=False)
 def test_session_drop_restores_everything():
     eng = MockEngine()
     remote = _Server(eng).remote()
     remote.kill(PS5)          # something is now "blocked"
     remote.close()            # GUI goes away (quit / crash)
-    for _ in range(500):      # generous budget (~10s) for the cleanup thread
-        if any(c[0] == 'cleanup' for c in eng.calls):
-            break
-        time.sleep(0.02)
+    assert eng.cleaned.wait(2), 'helper did not observe the GUI disconnect'
     # the helper restored everything on the dropped session — no orphaned block
     assert any(c[0] == 'cleanup' for c in eng.calls)
 
@@ -297,9 +306,11 @@ def test_controller_one_way_and_kill_all():
     c.toggle_one_way(PS5)
     assert ('one_way_kill', PS5) in ops.calls and PS5 in c.one_way_kills
     c.kill_all()
-    cut_ips = {ip for (name, ip) in ops.calls if name == 'block_all_for'}
+    cut_ips = {call[1] for call in ops.calls if call[0] == 'block_all_for'}
     assert '192.168.1.42' in cut_ips and '192.168.1.55' in cut_ips  # both users
     assert '192.168.1.1' not in cut_ips                             # router spared
+    assert ('lag', PS5, True) in ops.calls  # upgrade an already-routed one-way target
+    assert PS5 not in c.one_way_kills
 
 
 def test_controller_monitor_forwards_and_sniffs():

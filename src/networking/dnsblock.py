@@ -96,11 +96,13 @@ class DnsSpoofer:
         self.iface = iface
         self._targets: dict[str, set[str]] = {}   # target_ip -> blocked domain suffixes
         self._sniffer = None
+        self._capture_stop = threading.Event()
         self._lock = threading.Lock()
         # Windows in-kernel query dropper.
         self._wd_handle = None
         self._wd_thread = None
         self._wd_running = False
+        self._wd_stop = threading.Event()
 
     # -- control -------------------------------------------------------------
 
@@ -141,6 +143,7 @@ class DnsSpoofer:
             return {ip: sorted(doms) for ip, doms in self._targets.items()}
 
     def stop(self) -> None:
+        self._capture_stop.set()
         sniffer, self._sniffer = self._sniffer, None
         if sniffer is not None:
             try:
@@ -148,6 +151,12 @@ class DnsSpoofer:
             except Exception as exc:  # noqa: BLE001
                 log.debug('dns sniffer stop: %s', exc)
         self._stop_windivert()
+
+    def clear(self) -> None:
+        """Stop capture and forget names on session cleanup (restart uses stop)."""
+        self.stop()
+        with self._lock:
+            self._targets.clear()
 
     def _is_blocked(self, src_ip: str, qname: str) -> bool:
         with self._lock:
@@ -196,8 +205,19 @@ class DnsSpoofer:
             log.warning('scapy unavailable — DNS blocking disabled')
             return
         bpf = 'udp port 53 and (' + ' or '.join(f'src host {ip}' for ip in ips) + ')'
-        self._sniffer = AsyncSniffer(iface=self.iface, filter=bpf, store=False,
-                                     prn=self._process)
+        stop = threading.Event()
+        self._capture_stop = stop
+
+        def ready():
+            if stop.is_set():
+                # stop() can race the driver's startup. Once Scapy is ready,
+                # finish that pending stop without joining the capture thread.
+                sniffer.stop(join=False)
+
+        sniffer = AsyncSniffer(iface=self.iface, filter=bpf, store=False,
+                               prn=lambda pkt: None if stop.is_set() else self._process(pkt),
+                               started_callback=ready)
+        self._sniffer = sniffer
         try:
             self._sniffer.start()
             log.info('DNS forge active on %s for %s', self.iface, ips)
@@ -246,23 +266,27 @@ class DnsSpoofer:
             log.debug('pydivert unavailable — DNS drop falls back to forge-only')
             return
         self._wd_running = True
-        self._wd_thread = threading.Thread(target=self._wd_loop, args=(list(ips),),
+        self._wd_stop = threading.Event()
+        self._wd_thread = threading.Thread(target=self._wd_loop,
+                                           args=(list(ips), self._wd_stop),
                                            name='dns-windivert', daemon=True)
         self._wd_thread.start()
 
     def _stop_windivert(self) -> None:
         self._wd_running = False
-        handle, self._wd_handle = self._wd_handle, None
+        with self._lock:
+            self._wd_stop.set()
+            handle, self._wd_handle = self._wd_handle, None
         if handle is not None:
             try:
                 handle.close()
             except Exception:  # noqa: BLE001
                 pass
         thread, self._wd_thread = self._wd_thread, None
-        if thread is not None:
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)
 
-    def _wd_loop(self, ips: "list[str]") -> None:
+    def _wd_loop(self, ips: "list[str]", stop: threading.Event) -> None:
         """Forward-path loop: drop blocked DNS queries, re-inject everything else.
 
         Fail-safe by construction — the default action is *re-inject* (forward
@@ -282,24 +306,41 @@ class DnsSpoofer:
         except Exception as exc:  # noqa: BLE001 - typically not elevated
             log.warning('DNS WinDivert drop unavailable (%s); forge-only', exc)
             return
-        self._wd_handle = handle
-        log.info('DNS in-kernel query drop active for %s', ips)
-        while self._wd_running:
-            try:
-                pkt = handle.recv()
-            except Exception:  # noqa: BLE001 - handle closed on stop
-                break
-            payload = bytes(pkt.payload) if pkt.payload else b''
-            src = str(pkt.src_addr)
-            if pkt.udp is not None and pkt.dst_port == 53:
-                drop = self._should_drop_query(src, payload)
-            elif pkt.tcp is not None and pkt.dst_port == 443:
-                drop = self._should_drop_sni(src, payload)
-            else:
-                drop = False
-            if not drop:
+        try:
+            with self._lock:
+                # Opening the driver may finish after stop() returned. Never
+                # publish that stale handle or revive it during a later restart.
+                if stop.is_set() or stop is not self._wd_stop:
+                    return
+                self._wd_handle = handle
+            log.info('DNS in-kernel query drop active for %s', ips)
+            while not stop.is_set():
                 try:
-                    handle.send(pkt)           # forward normally
-                except Exception:  # noqa: BLE001
-                    pass
-            # else: blocked — DNS query dies (no answer) / TLS handshake dies.
+                    pkt = handle.recv()
+                except Exception:  # noqa: BLE001 - handle closed on stop
+                    break
+                drop = False
+                try:
+                    payload = bytes(pkt.payload) if pkt.payload else b''
+                    src = str(pkt.src_addr)
+                    if pkt.udp is not None and pkt.dst_port == 53:
+                        drop = self._should_drop_query(src, payload)
+                    elif pkt.tcp is not None and pkt.dst_port == 443:
+                        drop = self._should_drop_sni(src, payload)
+                except Exception as exc:  # preserve forwarding on parse failure
+                    log.debug('DNS packet parse failed: %s', exc)
+                if not drop:
+                    try:
+                        handle.send(pkt)           # forward normally
+                    except Exception:  # noqa: BLE001
+                        pass
+        finally:
+            with self._lock:
+                if self._wd_handle is handle:
+                    self._wd_handle = None
+                if self._wd_stop is stop:
+                    self._wd_running = False
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass

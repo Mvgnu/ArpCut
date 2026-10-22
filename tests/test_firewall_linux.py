@@ -110,3 +110,61 @@ def test_is_blocked_routes_through_nft(nft):
     fw.block_ip('eth0', '5.5.5.5', 'both')
     assert fw.is_blocked('5.5.5.5') is True
     assert fw.is_blocked('6.6.6.6') is False
+
+
+@pytest.mark.parametrize('args', [
+    ('bad;iface', 80, 'tcp', 'both', None),
+    ('eth0\n', 80, 'tcp', 'both', None),
+    ('eth0', True, 'tcp', 'both', None),
+    ('eth0', 80, 'invalid', 'both', None),
+    ('eth0', 80, 'tcp', 'invalid', None),
+    ('eth0', 80, 'tcp', 'both', 'not-an-ip'),
+])
+def test_invalid_port_arguments_never_execute_nft(nft, args):
+    assert fw.block_port(*args) is False
+    assert nft.calls == []
+
+
+def test_same_port_can_be_tracked_for_distinct_devices(nft):
+    assert fw.block_port('eth0', 80, 'tcp', target_ip='192.0.2.1')
+    assert fw.block_port('eth0', 80, 'tcp', target_ip='192.0.2.2')
+    assert len(nft.rules) == 2
+    assert {r['c'] for r in nft.rules} == {
+        'arpcut_port_80_tcp_192.0.2.1', 'arpcut_port_80_tcp_192.0.2.2'}
+    assert fw.unblock_port(80)
+    assert nft.rules == []
+
+
+def test_nft_reports_permission_failures_for_setup_and_cleanup():
+    calls = []
+
+    def denied(argv):
+        calls.append(argv)
+        return CompletedProcess(argv, 1, '', 'Operation not permitted')
+
+    backend = fw._Nft(denied)
+    assert not backend.block_ip('eth0', '192.0.2.1')
+    assert len(calls) == 1  # stop before trying to install a rule
+    assert not backend.clear()
+    assert not backend.unblock_ip('192.0.2.1')
+    assert 'Operation not permitted' in fw.last_error()
+
+
+def test_nft_missing_executable_is_a_reported_failure():
+    def missing(argv):
+        raise FileNotFoundError('nft is not installed')
+
+    backend = fw._Nft(missing)
+    assert not backend.clear()
+    assert 'nft is not installed' in fw.last_error()
+
+
+def test_nft_clear_absent_namespace_is_idempotent():
+    def missing_table(argv):
+        if argv[1:] == ['list', 'tables']:
+            return CompletedProcess(argv, 0, 'table inet unrelated\n', '')
+        return CompletedProcess(argv, 1, '', 'No such file or directory')
+
+    backend = fw._Nft(missing_table)
+    assert backend.clear()
+    assert backend.unblock_ip('192.0.2.1')

@@ -1,73 +1,67 @@
 #!/usr/bin/env python3
-"""Test pf blocking - run with sudo"""
-import sys
+"""Manual macOS pf diagnostic. Changes pf.conf temporarily; run with sudo."""
 import os
+from pathlib import Path
+import shlex
 from subprocess import run, PIPE
-import shutil
+import sys
+import tempfile
 
-def cmd(c):
-    print(f"$ {c}")
-    r = run(c, shell=True, stdout=PIPE, stderr=PIPE, text=True)
-    if r.stdout.strip():
-        print(r.stdout.strip())
-    if r.stderr.strip():
-        for line in r.stderr.strip().split('\n'):
-            if 'ALTQ' not in line and 'flushing' not in line.lower():
-                print(f"  [err] {line}")
-    return r
+PF_CONF = Path('/etc/pf.conf')
+
+
+def cmd(argv):
+    print(f"$ {shlex.join(argv)}")
+    result = run(argv, stdout=PIPE, stderr=PIPE, text=True)
+    if result.stdout.strip():
+        print(result.stdout.strip())
+    for line in result.stderr.strip().splitlines():
+        if 'ALTQ' not in line and 'flushing' not in line.lower():
+            print(f'  [err] {line}')
+    return result
+
 
 def main():
-    print("=" * 60)
-    print("PF DIRECT BLOCK TEST (no anchor)")
-    print("=" * 60)
-    
-    # Backup current pf.conf
-    print("\n[1] Backing up pf.conf...")
-    shutil.copy('/etc/pf.conf', '/tmp/pf.conf.backup')
-    print("  Saved to /tmp/pf.conf.backup")
-    
-    # Read current pf.conf
-    with open('/etc/pf.conf', 'r') as f:
-        original = f.read()
-    
-    # Create new pf.conf with block rule at the TOP
-    print("\n[2] Adding block rule to TOP of pf.conf...")
-    block_rule = "block drop quick on en0 from any to 8.8.8.8\n"
-    with open('/etc/pf.conf', 'w') as f:
-        f.write(block_rule)
-        f.write(original)
-    
-    # Reload pf
-    print("\n[3] Reloading pf...")
-    cmd("pfctl -f /etc/pf.conf")
-    
-    # Show rules
-    print("\n[4] Current rules (should see block at top):")
-    cmd("pfctl -s rules | head -10")
-    
-    # Test ping
-    print("\n[5] Testing if 8.8.8.8 is blocked:")
-    r = cmd("ping -c 1 -t 2 8.8.8.8")
-    if r.returncode != 0:
-        print("  ✓ BLOCKED - pf works when rule is in main config!")
-    else:
-        print("  ✗ NOT BLOCKED - something else is wrong")
-    
-    # Restore original
-    print("\n[6] Restoring original pf.conf...")
-    shutil.copy('/tmp/pf.conf.backup', '/etc/pf.conf')
-    cmd("pfctl -f /etc/pf.conf")
-    print("  Restored!")
-    
-    print("\n" + "=" * 60)
-    print("CONCLUSION:")
-    print("If [5] showed BLOCKED, anchors are the problem.")
-    print("We need to add rules to main pf.conf, not anchors.")
-    print("=" * 60)
+    print('PF DIRECT BLOCK TEST (no anchor)')
+    original = PF_CONF.read_bytes()
+    # A fixed /tmp/pf.conf.backup can be replaced with a symlink before a root
+    # run. Keep a private recovery copy until both file and rules are restored.
+    with tempfile.NamedTemporaryFile(prefix='arpcut-pf-', suffix='.conf',
+                                     delete=False) as recovery:
+        recovery.write(original)
+        recovery.flush()
+        os.fsync(recovery.fileno())
+        backup = Path(recovery.name)
+    print(f'Recovery copy: {backup}')
+
+    try:
+        PF_CONF.write_bytes(b'block drop quick on en0 from any to 8.8.8.8\n' + original)
+        if cmd(['pfctl', '-f', str(PF_CONF)]).returncode:
+            raise RuntimeError('Could not load diagnostic firewall rule')
+        cmd(['pfctl', '-s', 'rules'])
+        result = cmd(['ping', '-c', '1', '-t', '2', '8.8.8.8'])
+        if result.returncode:
+            print('Ping failed while the rule was active; connectivity failure can also cause this.')
+        else:
+            print('Ping succeeded while the rule was active.')
+    finally:
+        # Includes Ctrl+C and exceptions during testing. Keep the private
+        # recovery file if restoring the file or the live rules fails.
+        try:
+            PF_CONF.write_bytes(original)
+            if cmd(['pfctl', '-f', str(PF_CONF)]).returncode:
+                raise RuntimeError('Could not reload original firewall rules')
+        except BaseException:
+            print(f'Restore incomplete; original config remains at {backup}', file=sys.stderr)
+            raise
+        else:
+            backup.unlink()
+            print('Original firewall configuration restored.')
+
 
 if __name__ == '__main__':
+    if sys.platform != 'darwin':
+        raise SystemExit('This diagnostic is only supported on macOS.')
     if os.geteuid() != 0:
-        print("Run with: sudo python3 test_pf.py")
-        sys.exit(1)
+        raise SystemExit('Run with: sudo python3 test_pf.py')
     main()
-

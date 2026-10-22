@@ -1,13 +1,13 @@
 ; ArpCut — Windows installer (Inno Setup 6)
 ;
 ; A friendly wizard for non-technical users: installs ArpCut to Program Files,
-; silently installs the Npcap capture driver if it's missing, creates shortcuts,
+; optionally installs a licensed Npcap OEM driver, creates shortcuts,
 ; and requests administrator rights (ArpCut needs them for raw network access).
 ; On uninstall it flushes any leftover arpcut_* firewall rules.
 ;
 ; Build:  iscc /DMyAppVersion=2.0.0 packaging\windows\arpcut.iss
 ; Expects: dist\ArpCut-<version>.exe  (from `python build.py` on Windows)
-;          packaging\windows\vendor\npcap.exe  (download from https://npcap.com)
+; Optional licensed driver: /DBundleNpcapOEM and vendor\npcap-oem.exe
 
 #ifndef MyAppVersion
   #define MyAppVersion "2.0.0"
@@ -17,12 +17,14 @@
 #define MyAppPublisher "ArpCut"
 #define MyAppURL "https://github.com/Mvgnu/ArpCut"
 
-; Bundling Npcap is optional: if packaging\windows\vendor\npcap.exe is present it
-; is embedded and silently installed when the driver is missing; otherwise the
-; installer still builds and the app points users at the Npcap download on first
-; run. This lets CI produce an installer even without the (license-gated) driver.
-#define NpcapVendor "vendor\npcap.exe"
-#if FileExists(AddBackslash(SourcePath) + NpcapVendor)
+; Redistribution and /S require Npcap OEM. Default builds contain no Npcap;
+; users install it from https://npcap.com/#download. To bundle a licensed OEM
+; redistribution package, explicitly pass /DBundleNpcapOEM at compile time.
+#define NpcapVendor "vendor\npcap-oem.exe"
+#ifdef BundleNpcapOEM
+  #if !FileExists(AddBackslash(SourcePath) + NpcapVendor)
+    #error BundleNpcapOEM requires vendor\npcap-oem.exe
+  #endif
   #define HaveNpcap
 #endif
 
@@ -53,8 +55,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 Source: "..\..\dist\ArpCut-{#MyAppVersion}.exe"; DestDir: "{app}"; DestName: "{#MyAppExe}"; Flags: ignoreversion
 #ifdef HaveNpcap
-; Bundle the Npcap installer so users never hunt for a driver. Place it here first.
-Source: "{#NpcapVendor}"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NpcapMissing
+Source: "{#NpcapVendor}"; DestDir: "{tmp}"; DestName: "npcap-oem.exe"; Flags: deleteafterinstall; Check: NpcapMissing
 #endif
 
 [Icons]
@@ -65,7 +66,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: deskto
 [Run]
 #ifdef HaveNpcap
 ; Silently install Npcap in WinPcap-compatible mode if it isn't already present.
-Filename: "{tmp}\npcap.exe"; Parameters: "/S /winpcap_mode=yes"; StatusMsg: "Installing the Npcap capture driver..."; Check: NpcapMissing; Flags: waituntilterminated
+Filename: "{tmp}\npcap-oem.exe"; Parameters: "/S /winpcap_mode=yes"; StatusMsg: "Installing the Npcap capture driver..."; Check: NpcapMissing; Flags: waituntilterminated
 #endif
 Filename: "{app}\{#MyAppExe}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
